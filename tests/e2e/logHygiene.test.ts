@@ -363,4 +363,43 @@ describe('framework errors', () => {
     const line = logs.lines().find((l) => l.msg === 'request error');
     expect(line).toMatchObject({ status: 400, request_id: expect.any(String) });
   });
+
+  // Fastify logs a few errors straight to the logger as { err } (a failed writeHead, a serializer
+  // failure, a stream error, a double send), outside the LogController overrides above. The
+  // logger's own err serializer is the net under all of them.
+  it('redacts an err object logged directly to the logger: message only, no stack, no phone', () => {
+    server.log.error({ err: new TypeError('fail /lookup/5165551234') }, 'synthetic');
+
+    const line = logs.lines().find((l) => l.msg === 'synthetic');
+    expect(line!.err).toEqual({ type: 'TypeError', message: 'fail /lookup/[number]' });
+    expect(logs.text()).not.toContain('5165551234');
+    expect(logs.text()).not.toContain('stack');
+  });
+
+  // Fastify's "Reply was already sent" warnings carry the request URL, i.e. the phone, in the error
+  // message and in the log message (pino copies err.message into msg before any serializer runs).
+  it.each([
+    [
+      'sends twice',
+      async (_request: unknown, reply: { send: (payload: string) => unknown }) => {
+        reply.send('first');
+        reply.send('second');
+      },
+    ],
+    [
+      'sends and then also returns a value',
+      async (_request: unknown, reply: { send: (payload: string) => unknown }) => {
+        reply.send('first');
+        return 'second';
+      },
+    ],
+  ])('does not log the phone when a handler %s', async (_label, handler) => {
+    server.get('/double/:phone', handler);
+
+    await server.inject({ method: 'GET', url: `/double/${RAW_DIGITS}` });
+
+    expect(logs.text()).toContain('already sent'); // the warning itself is still logged
+    expectNoPhone(logs.text());
+    for (const l of logs.lines()) expect(l).not.toHaveProperty('err.stack');
+  });
 });

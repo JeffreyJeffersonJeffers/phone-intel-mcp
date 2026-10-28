@@ -10,7 +10,7 @@ import { env } from './env.js';
 import { healthRoute } from './http/healthRoute.js';
 import { lookupRoute, REJECTION_MESSAGES } from './http/lookupRoute.js';
 import { mcpRoute } from './http/mcpRoute.js';
-import { safeErrorMessage } from './lib/logSafe.js';
+import { redact, safeErrorMessage } from './lib/logSafe.js';
 import { createWalletRateLimiter, walletRateLimit } from './middleware/rateLimit.js';
 import { requirePayment, settleOnSuccess } from './payment/x402Middleware.js';
 
@@ -82,6 +82,28 @@ export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance 
           remoteAddress: req.ip,
           remotePort: req.socket?.remotePort,
         }),
+        // Every `{ err }` the logger is handed, wherever it comes from, is logged as its message
+        // only (redacted), never the stack. This is the net under the Fastify paths that bypass the
+        // LogController overrides above: a failed writeHead, a serializer or stream error, and a
+        // double send (FST_ERR_REP_ALREADY_SENT puts the request URL, i.e. the phone, in its message).
+        // (Cast: Fastify types this serializer as returning a stack; leaving it out is the point.)
+        err: ((err: unknown) => ({
+          type: (err as Error)?.constructor?.name ?? typeof err,
+          message: safeErrorMessage(err),
+        })) as unknown as (err: FastifyError) => { type: string; message: string; stack: string },
+      },
+      hooks: {
+        // The serializer above is not enough on its own: when `{ err }` is logged with no message,
+        // pino uses the raw err.message as the log message before any serializer runs, and a few
+        // Fastify warnings are plain strings with the URL in them. So string messages are redacted,
+        // and a missing message is filled in from the redacted error.
+        logMethod(args, method) {
+          const [first, second] = args as [unknown, unknown, ...unknown[]];
+          if (typeof first === 'string') args[0] = redact(first);
+          else if (typeof second === 'string') args[1] = redact(second);
+          else if (typeof first === 'object' && first !== null && 'err' in first) args[1] = safeErrorMessage(first.err);
+          method.apply(this, args);
+        },
       },
     },
     logController: new PhoneSafeLogController(),
