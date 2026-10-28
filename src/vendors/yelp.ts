@@ -18,20 +18,12 @@ export interface YelpLookup {
 const ENDPOINT = 'https://api.yelp.com/v3/businesses/search/phone';
 const TIMEOUT_MS = 900;
 
-// Yelp refuses requests from datacenter IPs (403 from Fly.io), so with SCRAPERAPI_KEY set the same
-// GET goes through ScraperAPI (https://docs.scraperapi.com): `url` is the Yelp URL and
-// `keep_headers=true` makes it forward our headers, i.e. the Yelp Authorization. Its median is about
-// 2 s, so the limit is longer than a direct call's. (ScraperAPI charges for a request that we cancel
-// before its own 70 s retry window ends, so a timeout still costs a credit.)
-const SCRAPERAPI_ENDPOINT = 'https://api.scraperapi.com/';
-const PROXY_TIMEOUT_MS = 5_000;
-
-// The status code of a proxied response is ScraperAPI's: 401 a bad ScraperAPI key, 403 the monthly
-// credits used up, 429 too many concurrent requests, 500 a request that failed after its retries
-// (not charged); 200 and 404 are the target's. A 401 is a broken configuration and stops the lookup.
-// A 403 is a capacity limit: the lookup carries on without Yelp (the payer still gets a dossier, with
-// no business) and an error-level log line tells the operator to upgrade. The rest degrade quietly,
-// like any vendor miss.
+// Yelp refuses requests from datacenter IPs (403 from Fly.io). With YELP_PROXY_URL and YELP_PROXY_AUTH
+// both set, the same GET goes to our own edge function on Vercel (the phone-intel-yelp-proxy project),
+// whose addresses Yelp does not block: `<YELP_PROXY_URL>/api/yelp?phone=<E.164>` with an X-Proxy-Auth
+// header. The proxy holds the Yelp key itself, so this process sends none, and returns Yelp's response
+// verbatim, status and body. The limit is a little over a direct call's to absorb the extra hop.
+const PROXY_TIMEOUT_MS = 2_500;
 
 // Stored in the business field for a confirmed "no business at this number", so a repeat call is a
 // cache hit instead of another paid Yelp call. A match is stored as the YelpBusiness itself.
@@ -67,20 +59,22 @@ function toBusiness(b: YelpApiBusiness): YelpBusiness {
 }
 
 export async function lookupYelp(phoneE164: string): Promise<YelpLookup> {
+  const proxy =
+    env.YELP_PROXY_URL && env.YELP_PROXY_AUTH ? { url: env.YELP_PROXY_URL, auth: env.YELP_PROXY_AUTH } : undefined;
+  const proxied = proxy !== undefined;
+  // Only a direct call needs our Yelp key: the proxy has its own.
   const apiKey = env.YELP_API_KEY;
-  if (!apiKey) throw new Error('YELP_API_KEY is not set');
+  if (!proxied && !apiKey) throw new Error('YELP_API_KEY is not set');
 
   const hit = await getCached<YelpBusiness | CachedMiss>(phoneE164, 'business');
   if (hit) return 'matched' in hit ? { business: null, cached: true } : { business: hit, cached: true };
 
   // "+" must be percent-encoded: left bare in a query string it decodes to a space.
-  const yelpUrl = `${ENDPOINT}?phone=${encodeURIComponent(phoneE164)}`;
-  const scraperApiKey = env.SCRAPERAPI_KEY;
-  const proxied = scraperApiKey !== undefined;
-  const url = proxied
-    ? `${SCRAPERAPI_ENDPOINT}?api_key=${encodeURIComponent(scraperApiKey)}` +
-      `&url=${encodeURIComponent(yelpUrl)}&keep_headers=true`
-    : yelpUrl;
+  const query = `phone=${encodeURIComponent(phoneE164)}`;
+  const url = proxy ? `${proxy.url.replace(/\/+$/, '')}/api/yelp?${query}` : `${ENDPOINT}?${query}`;
+  const headers: Record<string, string> = proxy
+    ? { 'X-Proxy-Auth': proxy.auth, Accept: 'application/json' }
+    : { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' };
 
   // One AbortController covers connect, headers and body read: fetch rejects with an AbortError
   // when it fires. The timer is always cleared so a fast response leaves no live handle behind.
@@ -88,19 +82,16 @@ export async function lookupYelp(phoneE164: string): Promise<YelpLookup> {
   const timer = setTimeout(() => controller.abort(), proxied ? PROXY_TIMEOUT_MS : TIMEOUT_MS);
   let status: number;
   let ok: boolean;
-  let body: { businesses?: unknown; error?: { code?: unknown } } | undefined;
+  // `error` is a string on the proxy's own errors ("unauthorized", ...) and an object on Yelp's.
+  let body: { businesses?: unknown; error?: unknown } | undefined;
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-      signal: controller.signal,
-    });
+    const response = await fetch(url, { method: 'GET', headers, signal: controller.signal });
     status = response.status;
     ok = response.ok;
-    // Through the proxy the status is ScraperAPI's, so Yelp's own verdict (an error body) has to be
-    // read from whatever JSON came back. Not for 401/403: those are ScraperAPI's own and have no
-    // Yelp body.
-    if (ok || (proxied && status !== 401 && status !== 403)) body = (await response.json()) as typeof body;
+    if (ok) body = (await response.json()) as typeof body;
+    // A proxied error is read when it parses, to tell the proxy's own errors from Yelp's. One that
+    // doesn't (a Vercel error page) just has no body.
+    else if (proxied) body = await response.json().then((b) => b as typeof body, () => undefined);
   } catch (err) {
     // Log Yelp timeouts (abort) so we can tell "no business match" from "proxy was too slow".
     // Network and non-JSON errors degrade silently as before.
@@ -115,21 +106,18 @@ export async function lookupYelp(phoneE164: string): Promise<YelpLookup> {
     clearTimeout(timer);
   }
 
-  // Bad credentials do not fix themselves, and degrading would hide them behind "no business" on
-  // every call. Surface them loudly, with the status only: never the response body or the request
-  // (the proxied URL holds the ScraperAPI key).
-  if (proxied && status === 401) throw new Error('ScraperAPI auth failed (HTTP 401): invalid SCRAPERAPI_KEY');
-  // Credits used up: degrade, not cached (it says nothing about the number), but not quietly. This is
-  // logged on every lookup that needed Yelp, so it is the line to alert on.
-  if (proxied && status === 403) {
-    vendorLog.error({ vendor: 'scraperapi', status }, 'scraperapi_credits_exhausted');
-    return DEGRADED;
+  // Bad credentials and a broken setup do not fix themselves, and degrading would hide them behind
+  // "no business" on every call. Surface them loudly, with the status only: never the response body
+  // or the request (which carries the proxy secret).
+  if (proxy) {
+    const yelpSpoke = typeof body?.error === 'object' && body.error !== null;
+    if (status === 401 && !yelpSpoke) throw new Error('Yelp proxy auth failed (HTTP 401)'); // our X-Proxy-Auth
+    if (status === 400 && !yelpSpoke) throw new Error('Yelp proxy rejected request (HTTP 400)'); // our number
+    if (status === 500 && body?.error === 'misconfigured') throw new Error('Yelp proxy misconfigured (HTTP 500)');
   }
-  if (!proxied && (status === 401 || status === 403)) throw new Error(`Yelp authentication failed (HTTP ${status})`);
-  if (proxied && body?.error?.code === 'TOKEN_INVALID') {
-    throw new Error(`Yelp authentication failed (via ScraperAPI, HTTP ${status})`);
-  }
-  // Any other non-2xx (400, 404, 429, 5xx): degrade like a timeout, and do not cache.
+  // Yelp refusing a key: ours on a direct call, the proxy's when it passes Yelp's answer through.
+  if (status === 401 || status === 403) throw new Error(`Yelp authentication failed (HTTP ${status})`);
+  // Any other non-2xx (400, 404, 429, 5xx, the proxy's 502): degrade like a timeout, and do not cache.
   if (!ok || !body) return DEGRADED;
 
   // A 200 without a businesses array is a vendor gap, not a confirmed "no match": do not cache it.

@@ -44,17 +44,16 @@ describe('redact', () => {
     expect(redact(`oops ${key} oops`)).toBe('oops [redacted] oops');
   });
 
-  // The ScraperAPI key travels in the query string of every proxied Yelp request, so any error that
-  // quotes that URL quotes the key. (src/env.ts reads process.env once, hence the fresh import.)
-  it('removes the configured SCRAPERAPI_KEY, raw and URL-encoded, if an error quotes the proxied URL', async () => {
+  // The proxy secret travels in the X-Proxy-Auth header of every proxied Yelp request, so any error
+  // that quotes the request quotes it. (src/env.ts reads process.env once, hence the fresh import.)
+  it('removes the configured YELP_PROXY_AUTH, raw and URL-encoded, if an error quotes the request', async () => {
     vi.resetModules();
-    vi.stubEnv('SCRAPERAPI_KEY', 'sa/key+0123456789abcdef');
+    vi.stubEnv('YELP_PROXY_AUTH', 'proxy/auth+0123456789abcdef');
     try {
       const { redact: fresh } = await import('../../src/lib/logSafe.js');
-      const url = `https://api.scraperapi.com/?api_key=${encodeURIComponent('sa/key+0123456789abcdef')}&keep_headers=true`;
 
-      expect(fresh(`request to ${url} failed`)).toBe('request to https://api.scraperapi.com/?api_key=[redacted]&keep_headers=true failed');
-      expect(fresh('raw sa/key+0123456789abcdef raw')).toBe('raw [redacted] raw');
+      expect(fresh('headers: x-proxy-auth: proxy/auth+0123456789abcdef')).toBe('headers: x-proxy-auth: [redacted]');
+      expect(fresh(`url ?auth=${encodeURIComponent('proxy/auth+0123456789abcdef')} failed`)).toBe('url ?auth=[redacted] failed');
     } finally {
       vi.unstubAllEnvs();
     }
