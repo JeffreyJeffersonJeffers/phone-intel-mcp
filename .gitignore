@@ -7,3 +7,5 @@ dist/
 .DS_Store
 .superpowers/
 coverage/
+.test-payer-key
+_pay-and-lookup.ts
