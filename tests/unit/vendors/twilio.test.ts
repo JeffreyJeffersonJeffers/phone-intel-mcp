@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import postgres from 'postgres';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getCached } from '../../../src/cache/cache.js';
@@ -46,6 +47,17 @@ const twilioResponse = (
 // What the SDK rejects with on an HTTP error: an Error carrying the HTTP status and Twilio code.
 const twilioError = (fields: { status?: number; code?: number }) =>
   Object.assign(new Error('Twilio request failed'), fields);
+
+// The same, but carrying both credentials in its message (as an HTTP client echoing a URL with
+// userinfo would) and in a nested cause. Used to prove the adapter forwards neither.
+const leakyTwilioError = (fields: { status?: number; code?: number }) =>
+  Object.assign(
+    new Error(
+      `Request failed: https://${mockEnv.TWILIO_SID}:${mockEnv.TWILIO_TOKEN}@lookups.twilio.com/v2/PhoneNumbers/${PHONE}`,
+      { cause: new Error(`credentials ${mockEnv.TWILIO_SID}:${mockEnv.TWILIO_TOKEN}`) },
+    ),
+    fields,
+  );
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -166,14 +178,35 @@ describe('lookupTwilio failure handling', () => {
     ['403', { status: 403 }, /twilio.*(403|auth)/i],
     ['code 20003 alone', { code: 20003 }, /twilio.*auth/i],
   ])('throws loudly on Twilio auth failure (%s) instead of degrading', async (_label, fields, pattern) => {
-    fetchMock.mockRejectedValue(twilioError(fields));
-    const error = await lookupTwilio(PHONE).catch((e: Error) => e);
+    fetchMock.mockRejectedValue(leakyTwilioError(fields));
+    const error = await lookupTwilio(PHONE).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(pattern);
-    // Status/code only: neither credential may appear in the error that reaches the logs.
-    expect((error as Error).message).not.toContain(mockEnv.TWILIO_TOKEN);
-    expect((error as Error).message).not.toContain(mockEnv.TWILIO_SID);
+    // Status/code only. The upstream error echoes both credentials in its message and its cause,
+    // so none of this may survive into what reaches the logs: not the message, not a `cause`
+    // chain, not any other property (util.inspect walks them all).
+    const everything = inspect(error, { depth: null, showHidden: true });
+    expect(everything).not.toContain(mockEnv.TWILIO_SID);
+    expect(everything).not.toContain(mockEnv.TWILIO_TOKEN);
+    expect((error as Error).cause).toBeUndefined();
+    expect(await getCached(PHONE, 'carrier')).toBeNull();
+  });
+
+  it('throws loudly when the SDK rejects the SID at client construction, instead of degrading', async () => {
+    // The client is memoised after its first successful construction, so reach the constructor
+    // again through a fresh module graph. The stub applies the SDK's real rule.
+    vi.resetModules();
+    const { default: freshTwilio } = await import('twilio');
+    vi.mocked(freshTwilio).mockImplementationOnce(((sid: string) => {
+      if (!sid.startsWith('AC')) throw new Error('accountSid must start with AC');
+      return { lookups: { v2: { phoneNumbers: phoneNumbersMock } } };
+    }) as never);
+    const { lookupTwilio: freshLookup } = await import('../../../src/vendors/twilio.js');
+    mockEnv.TWILIO_SID = 'not-an-AC-sid'; // after the import: the env mock factory re-seeds creds
+
+    await expect(freshLookup(PHONE)).rejects.toThrow(/accountSid must start with AC/);
+    expect(phoneNumbersMock).not.toHaveBeenCalled();
     expect(await getCached(PHONE, 'carrier')).toBeNull();
   });
 

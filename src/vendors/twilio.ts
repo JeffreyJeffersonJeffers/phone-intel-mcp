@@ -68,12 +68,14 @@ export async function lookupTwilio(phoneE164: string): Promise<TwilioLookup> {
   const hit = await getCached<Omit<TwilioLookup, 'cached'>>(phoneE164, 'carrier');
   if (hit) return { ...hit, cached: true };
 
+  // Built outside the try: a constructor failure (the SDK rejects a SID not starting with "AC")
+  // is a config error with no status/code, so it must surface, not degrade to "unknown carrier".
+  const api = twilioClient(sid, token);
+
   let response;
   try {
     response = await withTimeout(
-      twilioClient(sid, token)
-        .lookups.v2.phoneNumbers(phoneE164)
-        .fetch({ fields: 'line_type_intelligence,caller_name' }),
+      api.lookups.v2.phoneNumbers(phoneE164).fetch({ fields: 'line_type_intelligence,caller_name' }),
       TIMEOUT_MS,
     );
   } catch (err) {
