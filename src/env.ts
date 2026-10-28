@@ -11,6 +11,8 @@ export interface Env {
   readonly CDP_API_KEY: string | undefined;
   readonly CDP_API_SECRET: string | undefined;
   readonly WALLET_ADDRESS: string | undefined;
+  // Key for the HMAC behind phone_hash in the logs; required in production (see lib/phoneHash.ts).
+  readonly LOG_PHONE_HMAC_KEY: string | undefined;
   readonly PORT: number;
   readonly NODE_ENV: NodeEnv;
 }
@@ -38,6 +40,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Readonly<Env> 
     CDP_API_KEY: source.CDP_API_KEY || undefined,
     CDP_API_SECRET: source.CDP_API_SECRET || undefined,
     WALLET_ADDRESS: source.WALLET_ADDRESS || undefined,
+    LOG_PHONE_HMAC_KEY: source.LOG_PHONE_HMAC_KEY || undefined,
     PORT: port,
     NODE_ENV: nodeEnv as NodeEnv,
   });

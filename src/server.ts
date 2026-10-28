@@ -11,6 +11,7 @@ import { healthRoute } from './http/healthRoute.js';
 import { lookupRoute, REJECTION_MESSAGES } from './http/lookupRoute.js';
 import { mcpRoute } from './http/mcpRoute.js';
 import { redact, safeErrorMessage } from './lib/logSafe.js';
+import { phoneHashKey } from './lib/phoneHash.js';
 import { createWalletRateLimiter, walletRateLimit } from './middleware/rateLimit.js';
 import { requirePayment, settleOnSuccess } from './payment/x402Middleware.js';
 
@@ -120,6 +121,8 @@ export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance 
   // Built here, not inside the plugin below, so a missing WALLET_ADDRESS (or mainnet CDP key)
   // throws from buildServer() at startup instead of surfacing later during plugin loading.
   const requireUsdc = requirePayment(PRICE_USDC, env.NODE_ENV === 'production' ? 'base' : 'base-sepolia');
+  // Same reason: a production server without LOG_PHONE_HMAC_KEY must fail here, not on its first lookup.
+  phoneHashKey();
   // One allowance per wallet across both paid paths. It must run after requireUsdc, which is what
   // identifies the wallet; requests that never reach a verified payment are not metered.
   const limitWallet = walletRateLimit(createWalletRateLimiter());

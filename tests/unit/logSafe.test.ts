@@ -37,6 +37,13 @@ describe('redact', () => {
     expect(out).toBe('key=[redacted] rejected');
   });
 
+  // The phone-hash key is a credential too: anyone holding it can rebuild phone_hash for any number.
+  it('removes the configured LOG_PHONE_HMAC_KEY if it ever shows up in an error', () => {
+    const key = process.env.LOG_PHONE_HMAC_KEY!;
+    expect(key).toBeTruthy(); // the test fixture from vitest.config.ts
+    expect(redact(`oops ${key} oops`)).toBe('oops [redacted] oops');
+  });
+
   it('keeps the parts of an error that make it diagnosable', () => {
     for (const message of [
       'Twilio authentication failed (HTTP 401, Twilio code 20003)',

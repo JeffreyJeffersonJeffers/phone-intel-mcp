@@ -22,6 +22,7 @@ function configuredSecrets(): string[] {
     env.CDP_API_KEY,
     env.CDP_API_SECRET,
     env.DATABASE_URL,
+    env.LOG_PHONE_HMAC_KEY,
   ].filter((value): value is string => !!value && value.length >= SHORTEST_SECRET);
 }
 

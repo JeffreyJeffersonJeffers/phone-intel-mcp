@@ -43,4 +43,11 @@ describe('payment startup checks', () => {
     const server = await build({ NODE_ENV: 'production', CDP_API_KEY: 'key-id', CDP_API_SECRET: 'key-secret' });
     await server.close();
   });
+
+  // Not a payment check, but the same kind: a production server must not come up unable to log safely.
+  it('refuses to start in production without LOG_PHONE_HMAC_KEY (phone_hash must be keyed)', async () => {
+    await expect(
+      build({ NODE_ENV: 'production', CDP_API_KEY: 'key-id', CDP_API_SECRET: 'key-secret', LOG_PHONE_HMAC_KEY: '' }),
+    ).rejects.toThrow(/LOG_PHONE_HMAC_KEY is not set/);
+  });
 });
