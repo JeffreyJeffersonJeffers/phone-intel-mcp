@@ -142,19 +142,19 @@ const ECDSA_SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
 // per-payer in-flight cap, so it has to be authenticated before it can hold a slot: otherwise
 // requests naming a victim's (public, on-chain) address keep that victim's slot taken.
 //
-// False only for a plain 65-byte ECDSA signature that was not made by `from` (or is not a signature
-// at all). Any other length is a smart-contract wallet (ERC-1271, or ERC-6492 for a not yet deployed
-// one; 64-byte EIP-2098 compact signatures land here too). Those can only be checked with an on-chain
-// call, so they are passed on to the facilitator unchecked: in v1 a smart-wallet payer can still be
-// griefed by a forged `from`, and a smart wallet that happens to sign with exactly 65 bytes (a 1-of-1
-// Safe, say) is rejected here. Expected to be rare at launch.
+// v1 is EOA-only: the one accepted shape is a 65-byte ECDSA signature made by `from`. Anything else
+// is rejected, whatever its length. That includes smart-contract wallets (ERC-1271, or ERC-6492 for a
+// not yet deployed one; 64-byte EIP-2098 compact signatures too), which could only be checked with an
+// on-chain call and so are not supported. It must be a rejection and not a pass-through: a forger
+// picks the signature, so any length that skipped this check would be the one they send, and would
+// again hold the victim's slot.
 async function isSignedByNamedPayer(
   payload: PaymentPayload,
   evmPayload: ExactEvmPayload,
   requirements: PaymentRequirements,
 ): Promise<boolean> {
   const { signature, authorization } = evmPayload;
-  if (!ECDSA_SIGNATURE.test(signature)) return true;
+  if (!ECDSA_SIGNATURE.test(signature)) return false;
   const { name, version } = requirements.extra as { name: string; version: string };
   try {
     // getAddress, like the client's signer: viem's EIP-712 encoder rejects a mixed-case address

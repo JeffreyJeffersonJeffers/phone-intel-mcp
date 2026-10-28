@@ -428,10 +428,9 @@ describe('payment replay', () => {
 // The in-flight cap below is keyed by the `from` address in the header, which anyone can write: payer
 // addresses are public on-chain. Without a check, junk-signature requests naming a victim's address
 // keep the victim's slot taken and every real request from them gets 429 (a cheap, sustained denial
-// of service). So for an ordinary wallet (a 65-byte ECDSA signature) the signature is checked
-// locally, before the nonce is claimed and before the slot is taken. A signature of any other length
-// is a smart-contract wallet (ERC-1271 / ERC-6492), which can't be checked without an on-chain call:
-// those go to the facilitator as before, and a smart-wallet payer can still be griefed in v1.
+// of service). So the signature is checked locally, before the nonce is claimed and before the slot is
+// taken. v1 is EOA-only: the one accepted shape is a 65-byte ECDSA signature by the named payer, and
+// anything else (smart-contract wallets included, ERC-1271 / ERC-6492) is rejected there and then.
 describe('payer authentication before the slot', () => {
   const newKey = () => `0x${randomBytes(32).toString('hex')}`;
   const decode = (header: string) => JSON.parse(Buffer.from(header, 'base64').toString());
@@ -450,8 +449,16 @@ describe('payer authentication before the slot', () => {
     });
 
   // The attack as it was measured: forgeries naming one victim sent back to back while the victim keeps
-  // trying. The facilitator is slow (as a real one is), which is what let the forgeries pile up.
-  it('keeps a victim served through a burst of forgeries naming them', async () => {
+  // trying. The facilitator is slow (as a real one is), which is what let the forgeries pile up. The
+  // attacker's choice of signature is free, so every shape of it has to be turned away locally: a
+  // well-formed one by the wrong key, and ones of the wrong length (the cheapest forgery of all).
+  it.each([
+    ['a well-formed signature by someone else', undefined],
+    ['a 1-byte signature', 1],
+    ['a 64-byte signature', 64],
+    ['a 66-byte signature', 66],
+    ['a 100-byte signature', 100],
+  ])('keeps a victim served through a burst of forgeries naming them, signed with %s', async (_label, junkBytes) => {
     server = buildServer();
     facilitator.verify.mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 30));
@@ -459,7 +466,12 @@ describe('payer authentication before the slot', () => {
     });
     const victimKey = newKey();
     const victimAddress = fromOf(await pay({ payerPrivateKey: victimKey }));
-    const forgeries = await Promise.all(Array.from({ length: 40 }, () => forgedAs(victimAddress)));
+    const forgeries = await Promise.all(
+      Array.from({ length: 40 }, async () => {
+        const forged = await forgedAs(victimAddress);
+        return junkBytes === undefined ? forged : withSignature(forged, `0x${'ab'.repeat(junkBytes)}`);
+      }),
+    );
     const legit = await Promise.all(Array.from({ length: 8 }, () => pay({ payerPrivateKey: victimKey })));
 
     const burst = Promise.all(forgeries.map((header) => paidGet(server, header)));
@@ -551,18 +563,19 @@ describe('payer authentication before the slot', () => {
     expect(facilitator.settle).toHaveBeenCalledTimes(1);
   });
 
-  // 64 bytes (EIP-2098 compact), a contract wallet's ERC-1271 blob and an ERC-6492-wrapped one are all
-  // "not a plain 65-byte signature": they can't be checked here, so they are NOT rejected locally.
-  it.each([64, 100, 300])('does not reject locally a %i-byte signature: the facilitator decides', async (bytes) => {
+  // v1 takes ordinary-wallet (EOA) signatures only. A signature of any other length (1 byte of junk, a
+  // 64-byte compact one, a contract wallet's ERC-1271 blob or ERC-6492 wrapper) can't be checked here
+  // and is not accepted: letting it through would hand every forger a way around the check above.
+  it.each([1, 64, 66, 100])('rejects a %i-byte signature locally and never calls the facilitator', async (bytes) => {
     server = buildServer();
-    const signature = `0x${'ab'.repeat(bytes)}`;
-    const header = withSignature(await pay({ payerPrivateKey: newKey() }), signature);
+    const header = withSignature(await pay({ payerPrivateKey: newKey() }), `0x${'ab'.repeat(bytes)}`);
 
     const res = await paidGet(server, header);
 
-    expect(res.statusCode).toBe(200); // the stubbed facilitator accepts it
-    expect(facilitator.verify).toHaveBeenCalledTimes(1);
-    expect(facilitator.verify.mock.calls[0]![0].payload.signature).toBe(signature);
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).toMatchObject({ error: 'invalid_exact_evm_payload_signature' });
+    expect(facilitator.verify).not.toHaveBeenCalled();
+    expect(compose).not.toHaveBeenCalled();
   });
 });
 
