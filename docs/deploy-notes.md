@@ -14,13 +14,13 @@ Nothing here is run by the build; each step is a person's decision.
    and breaks correlation with older logs.
    `openssl rand -hex 32`
 
-   Also **`SCRAPERAPI_KEY`**. Yelp answers 403 to Fly's (datacenter) addresses, so on Fly the Yelp calls go
-   through ScraperAPI; without the key they go direct and Yelp refuses them (the lookup then fails with a
-   Yelp authentication error, see below). Sign up for a key at https://www.scraperapi.com (no card needed) and set it as a secret. **Mind the
-   quota:** ScraperAPI's pricing page gives a 7-day trial of 5,000 credits, and the free plan after that is
-   **1,000 credits with at most 5 concurrent connections**, not 5,000 a month. Paid plans start at Hobby,
-   $49/month for 100,000 credits and 20 concurrent threads. Nothing else needs to change: the server
-   starts without it, which is right for local development from a home connection.
+   Also **`YELP_PROXY_URL`** and **`YELP_PROXY_AUTH`**, together. Yelp answers 403 to Fly's (datacenter)
+   addresses, so on Fly the Yelp calls go through our proxy on Vercel (project `phone-intel-yelp-proxy`):
+   `YELP_PROXY_URL` is its base URL (`https://phone-intel-yelp-proxy.vercel.app`) and `YELP_PROXY_AUTH` is
+   the shared secret, which must equal `PROXY_AUTH_SECRET` in the Vercel project. The Yelp key itself now
+   lives in the Vercel project (`YELP_API_KEY` there); Fly does not need it while the proxy is in use. Keep
+   it on Fly only for the local-development direct-call fallback. **If only one of the two is set the
+   server calls Yelp directly, and on Fly that is a Yelp 403 and a `502` on every lookup.**
 3. **Migrations.** The Task 6 `enrichment_*` columns must already be applied to the production database.
 4. **One machine.** Deploy with `--ha=false`. The rate limiter, the per-wallet in-flight slots and the
    replay-nonce ledger are all in memory and single-instance; a second machine needs a shared store
@@ -61,43 +61,38 @@ necessary, not proof that `/verify` and `/settle` accept our payload.
 - `latency_ms` on the lookup line is measured in the handler: it includes payment verification and
   excludes settlement. Fastify's own `request completed` line (`responseTime`) includes settlement.
 
-## ScraperAPI (the Yelp proxy)
+## The Yelp proxy (Vercel)
 
-With `SCRAPERAPI_KEY` set, each uncached Yelp lookup is one GET to `https://api.scraperapi.com/` with our
-Yelp URL in `url=` and `keep_headers=true`, which makes ScraperAPI forward our `Authorization: Bearer <Yelp
-key>`. It costs one credit; a cache hit costs none. Things that follow from how it works
-(https://docs.scraperapi.com/responses-and-formats/api-status-codes):
+With `YELP_PROXY_URL` and `YELP_PROXY_AUTH` set, each uncached Yelp lookup is one
+`GET <YELP_PROXY_URL>/api/yelp?phone=%2B1…` with an `X-Proxy-Auth` header and **no** Yelp `Authorization`
+(the proxy adds the Yelp key itself, so it never leaves Vercel). The proxy returns Yelp's response verbatim,
+status and body, plus a few errors of its own. Source: `phone-intel-yelp-proxy/api/yelp.ts`. A cache hit
+makes no call.
 
-- **Its status codes are its own.** `401` is a bad `SCRAPERAPI_KEY`; `403` is the monthly credits used up;
-  `429` is more concurrent requests than the plan allows (5 on the free plan: a burst of more than five
-  uncached business lookups at once will lose the extra ones to "no business", silently, because a `429`
-  degrades); `500` means it failed after its own retries (not charged); `200` and `404` are the target's.
-- **A bad `SCRAPERAPI_KEY` (`401`) stops the lookup.** It throws `ScraperAPI auth failed (HTTP 401): invalid
-  SCRAPERAPI_KEY`, so every lookup that needs Yelp is a `502 vendor_failure` (not charged to the payer) and the
-  message appears in the `adapter_errors` of a `lookup failed: vendor failure` log line. That is a
-  configuration error to fix, not a capacity limit.
-- **When the credits run out (`403`), Yelp degrades** (`business_match: null`; the number is classified from
-  its line type), the payer is charged as usual, and nothing is cached for the number. **Monitor the Fly logs
-  for the line `scraperapi_credits_exhausted`** (error level, written once per lookup that needed Yelp):
+How our errors map (all of these end up in the `adapter_errors` of a `lookup failed: vendor failure` log
+line, as a `502 vendor_failure` that is not charged to the payer):
 
-  ```
-  {"level":50,...,"vendor":"scraperapi","status":403,"msg":"scraperapi_credits_exhausted"}
-  ```
+| Message | Meaning | Fix |
+|---|---|---|
+| `Yelp proxy auth failed (HTTP 401)` | The proxy said `unauthorized`, or answered with a non-JSON 401 page. | `YELP_PROXY_AUTH` differs from `PROXY_AUTH_SECRET` on Vercel, or Vercel's Deployment Protection is on for the project. |
+| `Yelp proxy rejected request (HTTP 400)` | The proxy said `invalid_phone` (it takes only `+1` and ten digits). | A bug on our side: we only send normalized US E.164. |
+| `Yelp proxy misconfigured (HTTP 500)` | The proxy has no `YELP_API_KEY`. | Set it in the Vercel project. |
+| `Yelp authentication failed (HTTP 401 or 403)` | Yelp itself refused the key held by the proxy, or Yelp blocks Vercel's addresses too. | Check the Yelp key in Vercel; test the proxy. |
 
-  When it appears, upgrade the plan (or wait for the monthly reset) and watch the balance in the
-  ScraperAPI dashboard. It has no `request_id` (it is written beneath the request, by the Yelp adapter);
-  correlate by time. Dossiers served in that state are charged in full and have no business, hours or
-  rating, so treat the line as an incident, not noise.
-- **A revoked or broken Yelp key may not be loud any more.** ScraperAPI only documents `200` and `404` as the
-  target's answers; any other target failure it retries for up to 70 s and then reports as `500`. Our limit
-  for a proxied call is 5 s, so such a call times out and the lookup degrades to "no business". We still
-  throw on a Yelp `TOKEN_INVALID` body if one comes through, but do not count on it. If business matches
-  suddenly vanish, test the Yelp key directly from a machine Yelp does not block.
-- **A timeout costs a credit.** ScraperAPI charges for a request we cancel before its 70 s window ends, and
-  its median latency (about 2 s) is well under our 5 s limit now.
-- **Latency.** A number with a business can now take up to 5 s (Yelp) + 0.9 s (Google) = 5.9 s, over the
-  2 s target.
-- **Privacy.** ScraperAPI sees the phone number being looked up (it is in the Yelp URL) and our Yelp API
-  key, in addition to Yelp.
+The proxy's own errors have a string `error` ("unauthorized") and Yelp's an object, which is how the two are
+told apart, since the proxy passes Yelp's statuses through unchanged. Everything else degrades quietly to "no
+business" and is not cached: the proxy's `502 upstream_failure`, Vercel's own 5xx, Yelp's 429 and 5xx. **Only
+a timeout is logged**: a `yelp_timeout` line at warn level, with `vendor`, `proxied` and `timeout_ms`
+(2500 through the proxy, 900 direct). It has no `request_id`; correlate by time. If business matches
+suddenly vanish, look for `yelp_timeout` lines and test the proxy by hand.
+
+- **Latency.** The limit through the proxy is 2.5 s, so a number with a business can take up to 2.5 s (Yelp)
+  + 0.9 s (Google) = 3.4 s, over the 2 s target.
+- **Privacy.** The phone number being looked up is in the proxy URL's query string. Vercel can show request
+  URLs in its logs, so numbers may appear there, outside our "no raw phone in logs" rule. Keeping them out
+  needs the proxy to take the number in a header or a POST body.
+- **Vercel's terms.** The proxy is on Vercel's free Hobby plan. As I understand Vercel's fair-use terms that
+  plan is for personal, non-commercial use, which this is not; check before relying on it, and expect to
+  need a paid plan.
 
 After deploy, look up a number that has a Yelp listing and check that `business_match` is not `null`.
