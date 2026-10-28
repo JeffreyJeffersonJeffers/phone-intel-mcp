@@ -127,11 +127,17 @@ function claimNonce(from: string, nonce: string, validBefore: number): (() => vo
   return () => void claimedNonces.delete(key);
 }
 
+// Takes the payer's single in-flight slot (see x402Middleware), or returns null if it is taken.
+export type AdmitPayer = (from: string) => (() => void) | null;
+
 // `facilitatorError` marks a failure of the facilitator call itself (timeout, network, garbled
 // reply) as opposed to a verdict about the payment, so the middleware can log the two differently.
+// `concurrent` means the payer already has a request in flight: not a verdict on the payment, which
+// is left unused (its nonce released) so the same header can be sent again. On success the caller
+// holds the payer's slot and must call `releaseSlot` once the request is over.
 export type VerifyResult =
-  | { ok: true; payload: PaymentPayload; requirements: PaymentRequirements }
-  | { ok: false; reason: string; facilitatorError?: true };
+  | { ok: true; payload: PaymentPayload; requirements: PaymentRequirements; releaseSlot: () => void }
+  | { ok: false; reason: string; facilitatorError?: true; concurrent?: true };
 
 // `resource` goes to the facilitator, a third party. Pass the route pattern, never the request
 // URL: for /lookup/:phone the URL is the phone number.
@@ -140,6 +146,7 @@ export async function verifyPayment(
   requiredAmount: UsdcAmount,
   network: PaymentNetwork,
   resource: string,
+  admitPayer: AdmitPayer,
 ): Promise<VerifyResult> {
   let payload: PaymentPayload;
   try {
@@ -172,19 +179,29 @@ export async function verifyPayment(
   const release = claimNonce(authorization.from, authorization.nonce, validBefore);
   if (!release) return { ok: false, reason: 'payment_already_used' };
 
+  // After the nonce claim, so a replayed header still reads payment_already_used; before the
+  // facilitator call, so this payment's balance check comes after the previous one's settlement.
+  const releaseSlot = admitPayer(authorization.from);
+  if (!releaseSlot) {
+    release(); // never served or settled: the client may send this same header again
+    return { ok: false, reason: 'concurrent_request', concurrent: true };
+  }
+
   try {
     const verdict = await withTimeout(getFacilitator(network).verify(payload, requirements), VERIFY_TIMEOUT_MS);
     if (!verdict.isValid) {
       release();
+      releaseSlot();
       return { ok: false, reason: reasonOf(verdict.invalidReason, 'verification_failed') };
     }
   } catch (err) {
     release();
+    releaseSlot();
     // Never log err: it can carry the payer address and the facilitator's response.
     if (err instanceof VerifyError) return { ok: false, reason: reasonOf(err.invalidReason, 'verification_failed') };
     return { ok: false, reason: 'verification_failed', facilitatorError: true };
   }
-  return { ok: true, payload, requirements };
+  return { ok: true, payload, requirements, releaseSlot };
 }
 
 export type SettleResult = { ok: true; header: string } | { ok: false; reason: string; facilitatorError?: true };

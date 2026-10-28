@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { Writable } from 'node:stream';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -293,6 +294,64 @@ describe('tool errors', () => {
 
     expect(result.isError).toBe(true);
     expect(facilitator.verify).not.toHaveBeenCalled();
+  });
+});
+
+// Same cap as GET /lookup (payment.test.ts has the full set): one request per paying wallet at a time.
+describe('per-payer in-flight cap', () => {
+  const key = () => `0x${randomBytes(32).toString('hex')}`;
+  const payFrom = (payerPrivateKey: string) =>
+    buildTestPayment({ amount: '0.03', network: 'base-sepolia', to: env.WALLET_ADDRESS!, payerPrivateKey });
+  const lookupCall = (phone: string) => ({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: { name: 'phone_intel.lookup', arguments: { phone } },
+  });
+
+  it('rejects a second concurrent tools/call from the same wallet with 429 concurrent_request', async () => {
+    const payer = key();
+    let release!: (dossier: Dossier) => void;
+    compose.mockImplementationOnce(() => new Promise<Dossier>((resolve) => (release = resolve)));
+
+    const first = postJsonRpc(lookupCall(PHONE), { 'x-payment': await payFrom(payer) });
+    await vi.waitFor(() => expect(compose).toHaveBeenCalledTimes(1));
+    const second = await postJsonRpc(lookupCall(PHONE), { 'x-payment': await payFrom(payer) });
+    release(DOSSIER);
+
+    expect((await first).statusCode).toBe(200);
+    expect(second.statusCode).toBe(429);
+    expect(second.json()).toEqual({ error: { code: 'concurrent_request', retry_after_seconds: 2 } });
+    expect(compose).toHaveBeenCalledTimes(1);
+    expect(facilitator.verify).toHaveBeenCalledTimes(1);
+  });
+
+  // A tool error is HTTP 200, so it never reaches the status check in settleOnSuccess: skipSettlement
+  // has to give the slot back, or a typo would lock the wallet out.
+  it('frees the wallet after a tool error that is not charged', async () => {
+    const payer = key();
+
+    const failed = await postJsonRpc(lookupCall('not-a-phone'), { 'x-payment': await payFrom(payer) });
+    const next = await postJsonRpc(lookupCall(PHONE), { 'x-payment': await payFrom(payer) });
+
+    expect(failed.json().result.isError).toBe(true);
+    expect(next.statusCode).toBe(200);
+    expect(next.json().result.isError).toBeFalsy();
+  });
+
+  it('never limits the free handshake and listing, whatever the wallet is doing', async () => {
+    const payer = key();
+    let release!: (dossier: Dossier) => void;
+    compose.mockImplementationOnce(() => new Promise<Dossier>((resolve) => (release = resolve)));
+    const paid = postJsonRpc(lookupCall(PHONE), { 'x-payment': await payFrom(payer) });
+    await vi.waitFor(() => expect(compose).toHaveBeenCalledTimes(1));
+
+    const client = await connect();
+    const { tools } = await client.listTools();
+    release(DOSSIER);
+    await paid;
+
+    expect(tools).toHaveLength(1);
   });
 });
 

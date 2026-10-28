@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { Writable } from 'node:stream';
 import { VerifyError } from 'x402/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -407,6 +408,184 @@ describe('payment replay', () => {
     expect(responses.filter((r) => r.statusCode === 402)).toHaveLength(2);
     expect(compose).toHaveBeenCalledTimes(1);
     expect(facilitator.settle).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The facilitator checks a payer's balance per call, not cumulatively, so a payer holding 0.03 USDC
+// can sign N authorizations with different nonces and send them at once: every one verifies, every
+// one runs the vendors, and only the first can settle. The replay ledger can't see this (the
+// nonces differ). One request per payer at a time, from before /verify until after /settle, makes
+// the second authorization's /verify happen after the first one's settlement has drained the balance.
+describe('per-payer in-flight cap', () => {
+  const RETRY_AFTER_SECONDS = 2;
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  // Several distinct authorizations (fresh nonce each) from one payer key.
+  const payFrom = async (key: string, count: number) =>
+    Promise.all(Array.from({ length: count }, () => pay({ payerPrivateKey: key })));
+  const newKey = () => `0x${randomBytes(32).toString('hex')}`;
+  const composeEntered = (times: number) => vi.waitFor(() => expect(compose).toHaveBeenCalledTimes(times));
+
+  it('rejects a second concurrent request from the same wallet with 429 concurrent_request', async () => {
+    server = buildServer();
+    const [first, second] = await payFrom(newKey(), 2);
+    const lookup = deferred<Dossier>();
+    compose.mockImplementationOnce(() => lookup.promise);
+
+    const inFlight = paidGet(server, first!);
+    await composeEntered(1);
+    const rejected = await paidGet(server, second!);
+    lookup.resolve(DOSSIER);
+    const served = await inFlight;
+
+    expect(served.statusCode).toBe(200);
+    expect(rejected.statusCode).toBe(429);
+    expect(rejected.json()).toEqual({ error: { code: 'concurrent_request', retry_after_seconds: RETRY_AFTER_SECONDS } });
+    expect(rejected.json().error.retry_after_seconds).toBeGreaterThan(0);
+    expect(rejected.headers['retry-after']).toBe(String(RETRY_AFTER_SECONDS));
+    // The rejected one cost nothing: no facilitator call, no vendor call, no settlement.
+    expect(facilitator.verify).toHaveBeenCalledTimes(1);
+    expect(compose).toHaveBeenCalledTimes(1);
+    expect(facilitator.settle).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets concurrent requests from different wallets both through', async () => {
+    server = buildServer();
+    const [first] = await payFrom(newKey(), 1);
+    const [second] = await payFrom(newKey(), 1);
+    const lookup = deferred<Dossier>();
+    compose.mockImplementation(() => lookup.promise);
+
+    const a = paidGet(server, first!);
+    const b = paidGet(server, second!);
+    await composeEntered(2); // both are inside the handler at the same time
+    lookup.resolve(DOSSIER);
+
+    expect((await a).statusCode).toBe(200);
+    expect((await b).statusCode).toBe(200);
+  });
+
+  it('treats the same wallet in a different hex case as the same wallet', async () => {
+    server = buildServer();
+    const [first, second] = await payFrom(newKey(), 2);
+    // The signature is not redone: the stubbed facilitator accepts it, the cap must still see one payer.
+    const recased = mutateAuthorization(second!, (auth) => {
+      auth.from = `0x${auth.from.slice(2).toUpperCase()}`;
+    });
+    expect(recased).not.toBe(second);
+    const lookup = deferred<Dossier>();
+    compose.mockImplementationOnce(() => lookup.promise);
+
+    const inFlight = paidGet(server, first!);
+    await composeEntered(1);
+    const rejected = await paidGet(server, recased);
+    lookup.resolve(DOSSIER);
+    await inFlight;
+
+    expect(rejected.statusCode).toBe(429);
+    expect(rejected.json().error.code).toBe('concurrent_request');
+  });
+
+  it('frees the wallet once the first request has been served and settled', async () => {
+    server = buildServer();
+    const [first, second] = await payFrom(newKey(), 2);
+
+    const a = await paidGet(server, first!);
+    const b = await paidGet(server, second!);
+
+    expect(a.statusCode).toBe(200);
+    expect(b.statusCode).toBe(200);
+    expect(facilitator.settle).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not use up the rejected authorization: the same header works on retry', async () => {
+    server = buildServer();
+    const [first, second] = await payFrom(newKey(), 2);
+    const lookup = deferred<Dossier>();
+    compose.mockImplementationOnce(() => lookup.promise);
+
+    const inFlight = paidGet(server, first!);
+    await composeEntered(1);
+    expect((await paidGet(server, second!)).statusCode).toBe(429);
+    lookup.resolve(DOSSIER);
+    await inFlight;
+    const retry = await paidGet(server, second!);
+
+    expect(retry.statusCode).toBe(200);
+  });
+
+  // The slot is released in a finally after settlement: whichever way the first request ends, the
+  // payer is not locked out afterwards.
+  describe('releases the wallet when the first request ends', () => {
+    const outcomes: [string, (key: string) => void, number][] = [
+      ['the lookup fails with a 5xx', () => compose.mockRejectedValueOnce(new Error('boom')), 500],
+      ['the lookup is rejected with a 400', () => {}, 400],
+      [
+        'settlement is refused',
+        () =>
+          facilitator.settle.mockResolvedValueOnce({
+            success: false,
+            errorReason: 'insufficient_funds',
+            transaction: '',
+            network: 'base-sepolia',
+          }),
+        402,
+      ],
+      ['settlement throws', () => facilitator.settle.mockRejectedValueOnce(new Error('network down')), 402],
+      [
+        'verification is refused',
+        () => facilitator.verify.mockResolvedValueOnce({ isValid: false, invalidReason: 'insufficient_funds' }),
+        402,
+      ],
+      ['verification throws', () => facilitator.verify.mockRejectedValueOnce(new Error('network down')), 402],
+    ];
+
+    it.each(outcomes)('when %s', async (label, arrange, expectedStatus) => {
+      server = buildServer();
+      const key = newKey();
+      const [first, second] = await payFrom(key, 2);
+      arrange(key);
+
+      const a = await paidGet(server, first!, label.includes('400') ? '/lookup/not-a-phone' : LOOKUP_URL);
+      const b = await paidGet(server, second!);
+
+      expect(a.statusCode).toBe(expectedStatus);
+      expect(b.statusCode).toBe(200);
+    });
+  });
+
+  // A slot that is never released (a vendor call that hangs forever, say) must not lock a payer out
+  // until the next restart. Authorizations expire within a minute anyway.
+  it('stops honoring a slot that has been held for over a minute', async () => {
+    server = buildServer();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const key = newKey();
+      const [first] = await payFrom(key, 1);
+      const lookup = deferred<Dossier>();
+      compose.mockImplementationOnce(() => lookup.promise);
+      const stuck = paidGet(server, first!);
+      await composeEntered(1);
+
+      vi.setSystemTime(Date.now() + 61_000);
+      const [later] = await payFrom(key, 1);
+      const res = await paidGet(server, later!);
+
+      expect(res.statusCode).toBe(200);
+      lookup.resolve(DOSSIER);
+      await stuck;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
