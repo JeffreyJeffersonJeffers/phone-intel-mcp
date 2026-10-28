@@ -36,12 +36,16 @@ const DEGRADED = { carrier: { name: null, type: 'unknown' }, caller_name: null, 
 // Shapes below are what the Twilio SDK hands back: camelCase instance fields (the SDK maps
 // carrier_name -> carrierName, caller_name -> callerName), null for a field that was not returned.
 const twilioResponse = (
-  line: { type?: string | null; carrierName?: string | null } | null,
+  line: { type?: string | null; carrierName?: string | null; errorCode?: number } | null,
   callerName: string | null = null,
 ) => ({
   lineTypeIntelligence: line,
   callerName: callerName === null ? null : { callerName },
 });
+
+// What the SDK rejects with on an HTTP error: an Error carrying the HTTP status and Twilio code.
+const twilioError = (fields: { status?: number; code?: number }) =>
+  Object.assign(new Error('Twilio request failed'), fields);
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -147,10 +151,51 @@ describe('lookupTwilio failure handling', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('returns a degraded result and does not cache when Twilio rejects', async () => {
-    fetchMock.mockRejectedValue(new Error('Twilio 503'));
+  it.each([
+    ['a 5xx', twilioError({ status: 503 })],
+    ['a 404', twilioError({ status: 404, code: 20404 })],
+    ['a network error', new Error('ECONNRESET')],
+  ])('returns a degraded result and does not cache on %s from Twilio', async (_label, error) => {
+    fetchMock.mockRejectedValue(error);
     expect(await lookupTwilio(PHONE)).toEqual(DEGRADED);
     expect(await getCached(PHONE, 'carrier')).toBeNull();
+  });
+
+  it.each([
+    ['401 with code 20003', { status: 401, code: 20003 }, /twilio.*(401|auth)/i],
+    ['403', { status: 403 }, /twilio.*(403|auth)/i],
+    ['code 20003 alone', { code: 20003 }, /twilio.*auth/i],
+  ])('throws loudly on Twilio auth failure (%s) instead of degrading', async (_label, fields, pattern) => {
+    fetchMock.mockRejectedValue(twilioError(fields));
+    const error = await lookupTwilio(PHONE).catch((e: Error) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(pattern);
+    // Status/code only: neither credential may appear in the error that reaches the logs.
+    expect((error as Error).message).not.toContain(mockEnv.TWILIO_TOKEN);
+    expect((error as Error).message).not.toContain(mockEnv.TWILIO_SID);
+    expect(await getCached(PHONE, 'carrier')).toBeNull();
+  });
+
+  it.each([
+    ['errorCode set and type null', { errorCode: 60601, type: null }],
+    ['errorCode set alongside a type', { errorCode: 60601, type: 'mobile' }],
+    ['no type', { carrierName: 'Verizon' }],
+    ['line_type_intelligence absent', null],
+  ])('does not cache a Twilio 200 with %s', async (_label, line) => {
+    fetchMock.mockResolvedValue(twilioResponse(line));
+    const first = await lookupTwilio(PHONE);
+    expect(first.cached).toBe(false);
+    expect(await getCached(PHONE, 'carrier')).toBeNull();
+
+    const second = await lookupTwilio(PHONE);
+    expect(second.cached).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports carrier.type unknown for a Twilio 200 that carries errorCode', async () => {
+    fetchMock.mockResolvedValue(twilioResponse({ errorCode: 60601, type: null }));
+    expect((await lookupTwilio(PHONE)).carrier.type).toBe('unknown');
   });
 
   it.each(['TWILIO_SID', 'TWILIO_TOKEN'])('throws a clear error, without calling Twilio, when %s is unset', async (key) => {

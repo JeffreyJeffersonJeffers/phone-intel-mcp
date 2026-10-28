@@ -50,6 +50,16 @@ async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | null> {
   }
 }
 
+// Bad credentials do not fix themselves, and degrading would hide them behind "unknown carrier"
+// on every call. Surface 401/403 (or Twilio's code 20003, "Authenticate") loudly. The message
+// carries only the status and code: never the original error, which could echo request details.
+function throwIfAuthError(err: unknown): void {
+  const { status, code } = (err ?? {}) as { status?: unknown; code?: unknown };
+  if (status === 401 || status === 403 || code === 20003) {
+    throw new Error(`Twilio authentication failed (HTTP ${status ?? 'unknown'}, Twilio code ${code ?? 'unknown'})`);
+  }
+}
+
 export async function lookupTwilio(phoneE164: string): Promise<TwilioLookup> {
   const { TWILIO_SID: sid, TWILIO_TOKEN: token } = env;
   if (!sid) throw new Error('TWILIO_SID is not set');
@@ -66,8 +76,9 @@ export async function lookupTwilio(phoneE164: string): Promise<TwilioLookup> {
         .fetch({ fields: 'line_type_intelligence,caller_name' }),
       TIMEOUT_MS,
     );
-  } catch {
-    response = null; // Twilio error: degrade like a timeout
+  } catch (err) {
+    throwIfAuthError(err);
+    response = null; // any other Twilio error (5xx, network, 404): degrade like a timeout
   }
   // Timeout or error: degrade, and do not cache, so the next call retries the vendor.
   if (!response) return { ...DEGRADED, cached: false };
@@ -80,6 +91,8 @@ export async function lookupTwilio(phoneE164: string): Promise<TwilioLookup> {
     },
     caller_name: response.callerName?.callerName ?? null,
   };
-  await setCached(phoneE164, 'carrier', result);
+  // A 200 whose line-type lookup failed (errorCode set, or no type) is a transient vendor gap,
+  // not an answer. Return what we have but do not cache it, so the next call retries.
+  if (!line?.errorCode && line?.type) await setCached(phoneE164, 'carrier', result);
   return { ...result, cached: false };
 }
