@@ -96,14 +96,18 @@ export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance 
       hooks: {
         // The serializer above is not enough on its own: when `{ err }` is logged with no message,
         // pino uses the raw err.message as the log message before any serializer runs, and a few
-        // Fastify warnings are plain strings with the URL in them. So string messages are redacted,
-        // and a missing message is filled in from the redacted error.
+        // Fastify warnings are plain strings with the URL in them. So a bare Error is logged as an
+        // `{ err }` (which the serializer handles), a missing message is filled in from the redacted
+        // error, and every string argument, the message and any %s values, is redacted.
         logMethod(args, method) {
-          const [first, second] = args as [unknown, unknown, ...unknown[]];
-          if (typeof first === 'string') args[0] = redact(first);
-          else if (typeof second === 'string') args[1] = redact(second);
-          else if (typeof first === 'object' && first !== null && 'err' in first) args[1] = safeErrorMessage(first.err);
-          method.apply(this, args);
+          const a = args as unknown[];
+          if (a[0] instanceof Error) a[0] = { err: a[0] };
+          const first = a[0];
+          if (typeof first === 'object' && first !== null && 'err' in first && typeof a[1] !== 'string') {
+            a.splice(1, 0, safeErrorMessage(first.err));
+          }
+          for (let i = 0; i < a.length; i++) if (typeof a[i] === 'string') a[i] = redact(a[i] as string);
+          method.apply(this, a as unknown as typeof args);
         },
       },
     },

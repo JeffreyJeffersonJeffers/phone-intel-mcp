@@ -389,6 +389,29 @@ describe('framework errors', () => {
     expect(logs.text()).not.toContain('5165551234');
   });
 
+  // The two other ways of handing the logger text: a bare Error as the only argument (pino logs its
+  // message and stack as-is), and %s-style arguments (interpolated after any message redaction).
+  it('redacts a bare Error handed to the logger: message only, no stack', () => {
+    server.log.error(new Error('fail /lookup/5165551234'));
+
+    const line = logs.lines().find((l) => String(l.msg).startsWith('fail'));
+    expect(line!.msg).toBe('fail /lookup/[number]');
+    expect(line!.err).toEqual({ type: 'Error', message: 'fail /lookup/[number]' });
+    expect(logs.text()).not.toContain('5165551234');
+    expect(logs.text()).not.toContain('stack');
+  });
+
+  it.each([
+    ['a message with a %s argument', (log: typeof server.log) => log.info('lookup %s failed', '5165551234')],
+    ['an object, a message and a %s argument', (log: typeof server.log) => log.info({ a: 1 }, 'lookup %s failed', '5165551234')],
+  ])('redacts the phone out of a %%s argument (%s)', (_label, write) => {
+    write(server.log);
+
+    const line = logs.lines().find((l) => String(l.msg).startsWith('lookup'));
+    expect(line!.msg).toBe('lookup [number] failed');
+    expect(logs.text()).not.toContain('5165551234');
+  });
+
   // Fastify's "Reply was already sent" warnings carry the request URL, i.e. the phone, in the error
   // message and in the log message (pino copies err.message into msg before any serializer runs).
   it.each([
