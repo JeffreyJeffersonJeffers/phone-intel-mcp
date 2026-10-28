@@ -40,6 +40,9 @@ FROM base
 # Copy built application
 COPY --from=build /app /app
 
+# Run unprivileged (the official node image ships a `node` user)
+USER node
+
 # Start the server by default, this can be overwritten at runtime
 EXPOSE 8080
 CMD [ "npm", "run", "start" ]
