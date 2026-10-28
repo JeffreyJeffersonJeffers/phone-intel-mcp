@@ -43,10 +43,12 @@ necessary, not proof that `/verify` and `/settle` accept our payload.
 
 - `payment: "settlement_failed"` rate: a payer who cancels or moves the funds between `/verify` and `/settle`
   gets one free lookup. Cost to them is gas; to us about one vendor round. A rising rate is the signal.
-- `payment: "concurrent_request"` against `payment: "verified"`: a high ratio from one `wallet_address_last6`
-  means a client is racing itself; a high ratio across many wallets suggests someone is naming payer
-  addresses they don't control (smart-contract-wallet payers can still be griefed this way in v1; ordinary
-  wallets cannot, their signature is checked before a slot is taken).
+- `payment: "concurrent_request"` against `payment: "verified"`: a high ratio means clients are sending a
+  second request while one is still in flight. (That line is written before the payer is known, so it has
+  no `wallet_address_last6`; the `verified` lines do.) It cannot be someone naming payer addresses they
+  don't control: EOA-signed requests cannot be griefed, because the signature is checked locally before
+  a slot is taken, and v1 does not accept smart-wallet signatures (ERC-1271/6492), so no griefable path
+  exists for them either.
 - `payment: "facilitator_error"` at error level: the facilitator is failing, not rejecting payments.
 - `latency_ms` on the lookup line is measured in the handler: it includes payment verification and
   excludes settlement. Fastify's own `request completed` line (`responseTime`) includes settlement.

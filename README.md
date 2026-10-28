@@ -164,7 +164,7 @@ Errors other than 402 share one envelope: `{ "error": { "code": "...", "message"
 - **US numbers only** (+1). Anything else is `400 not_us_number`.
 - **100 paid lookups per minute per paying wallet**, rolling window, counted across REST and MCP together.
 - **One request in flight per wallet.** Use several wallets for parallelism, or queue.
-- **Sign with an ordinary wallet key (an EOA).** Smart-contract wallets are not supported in v1: a payment signed by a contract wallet is not checked locally, and one that happens to carry a plain 65-byte signature is rejected as `invalid_exact_evm_payload_signature`.
+- **v1 accepts EOA (externally-owned account) signatures only.** Smart-contract wallets (ERC-1271 / 6492: Safe, Coinbase Smart Wallet, Argent, etc.) are not supported in v1. A payment whose signature is not a 65-byte signature by the wallet it names is rejected with `402 invalid_exact_evm_payload_signature` before anything is run.
 - **p95 target under 2 seconds** for the lookup itself (each vendor is bounded at 900 ms and a slow one degrades rather than blocking). Payment verification and settlement are extra round trips on top of that.
 - `GET /health`, MCP `initialize` and `tools/list` are free and never rate limited.
 
