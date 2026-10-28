@@ -376,6 +376,19 @@ describe('framework errors', () => {
     expect(logs.text()).not.toContain('stack');
   });
 
+  // One Fastify warning is a plain string with the URL in it, and is only reachable by writing to the
+  // raw socket (outside this app), so the net for it is tested at the logger.
+  it.each([
+    ['a bare message', (log: typeof server.log) => log.warn('reply sent in /lookup/5165551234')],
+    ['an object and a message', (log: typeof server.log) => log.warn({ a: 1 }, 'reply sent in /lookup/5165551234')],
+  ])('redacts the phone out of a log message (%s)', (_label, write) => {
+    write(server.log);
+
+    const line = logs.lines().find((l) => String(l.msg).startsWith('reply sent'));
+    expect(line!.msg).toBe('reply sent in /lookup/[number]');
+    expect(logs.text()).not.toContain('5165551234');
+  });
+
   // Fastify's "Reply was already sent" warnings carry the request URL, i.e. the phone, in the error
   // message and in the log message (pino copies err.message into msg before any serializer runs).
   it.each([
@@ -391,14 +404,6 @@ describe('framework errors', () => {
       async (_request: unknown, reply: { send: (payload: string) => unknown }) => {
         reply.send('first');
         return 'second';
-      },
-    ],
-    [
-      'writes the raw response and then also sends (a plain-string warning, not an err)',
-      async (_request: unknown, reply: { raw: { writeHead: (code: number) => void; end: (body: string) => void } }) => {
-        reply.raw.writeHead(200);
-        reply.raw.end('raw');
-        return (reply as unknown as { send: (payload: string) => unknown }).send('second');
       },
     ],
   ])('does not log the phone when a handler %s', async (_label, handler) => {
