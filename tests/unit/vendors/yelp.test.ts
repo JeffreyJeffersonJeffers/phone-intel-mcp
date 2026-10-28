@@ -6,10 +6,31 @@ import { lookupYelp } from '../../../src/vendors/yelp.js';
 
 // Yelp is mocked (global fetch: no network, no spend); the cache is the real Supabase Postgres,
 // same as the Task 3/4 tests, so cache behaviour here is exercised end to end.
-const { fetchMock, mockEnv } = vi.hoisted(() => ({
+const { fetchMock, mockEnv, logChunks } = vi.hoisted(() => ({
   fetchMock: vi.fn(),
   mockEnv: {} as Record<string, string | undefined>,
+  logChunks: [] as string[],
 }));
+
+// The adapter's own log (vendorLog) is a real pino logger; here it writes to memory so a test can
+// read the lines it would send to the Fly logs.
+vi.mock('../../../src/lib/vendorLog.js', async () => {
+  const { default: pino } = await import('pino');
+  const { Writable } = await import('node:stream');
+  const stream = new Writable({
+    write(chunk, _encoding, done) {
+      logChunks.push(chunk.toString());
+      done();
+    },
+  });
+  return { vendorLog: pino({ level: 'info' }, stream) };
+});
+const loggedLines = () =>
+  logChunks
+    .join('')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 
 // vitest.config.ts deliberately keeps vendor keys out of the test env, so inject a fake one.
 vi.mock('../../../src/env.js', async (importOriginal) => {
@@ -52,6 +73,7 @@ const mockYelp = (body: unknown) => yelpReturns(body);
 
 beforeEach(() => {
   fetchMock.mockReset();
+  logChunks.length = 0;
   vi.stubGlobal('fetch', fetchMock);
   mockEnv.YELP_API_KEY = 'test-yelp-key';
   // Unset unless a test sets it: with a ScraperAPI key Yelp is called through the proxy, and a key
@@ -336,18 +358,62 @@ describe('lookupYelp through ScraperAPI', () => {
   });
 
   describe('when ScraperAPI itself rejects us', () => {
-    it.each([
-      ['401, a bad ScraperAPI key', 401, /ScraperAPI auth failed \(HTTP 401\)/],
-      ['403, the monthly credits used up', 403, /ScraperAPI auth failed \(HTTP 403\)/],
-    ])('throws loudly on %s, with its own message and not as a Yelp failure', async (_label, status, pattern) => {
-      fetchMock.mockImplementation(async () => new Response(echoingBody(), { status }));
+    // A bad key is a configuration error that someone has to fix, so it stops the lookup.
+    it('throws loudly on a 401 (a bad ScraperAPI key), with its own message and not as a Yelp failure', async () => {
+      fetchMock.mockImplementation(async () => new Response(echoingBody(), { status: 401 }));
       const error = await lookupYelp(PHONE).catch((e: unknown) => e);
 
       expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toMatch(pattern);
+      expect((error as Error).message).toMatch(/ScraperAPI auth failed \(HTTP 401\)/);
       expect((error as Error).message).not.toMatch(/yelp/i);
       expectNoKeyLeak(error);
       expect(await getCached(PHONE, 'business')).toBeNull();
+    });
+
+    // Running out of credits is a capacity problem, not a broken deployment: the payer still gets a
+    // dossier (without the business), and the error-level log line is how the operator finds out.
+    describe('on a 403 (the monthly credits used up)', () => {
+      const exhausted = () => fetchMock.mockImplementation(async () => new Response(echoingBody(), { status: 403 }));
+
+      it('degrades to no business instead of failing the lookup, and does not cache it', async () => {
+        exhausted();
+
+        expect(await lookupYelp(PHONE)).toEqual(DEGRADED);
+        expect(await getCached(PHONE, 'business')).toBeNull();
+      });
+
+      it('logs scraperapi_credits_exhausted at error level on every such lookup', async () => {
+        exhausted();
+
+        await lookupYelp(PHONE);
+        await lookupYelp(PHONE);
+
+        const lines = loggedLines();
+        expect(lines).toHaveLength(2);
+        for (const line of lines) {
+          expect(line).toMatchObject({ level: 50, msg: 'scraperapi_credits_exhausted', vendor: 'scraperapi', status: 403 });
+        }
+      });
+
+      it('logs nothing that identifies the number or a key', async () => {
+        exhausted();
+
+        await lookupYelp(PHONE);
+
+        const text = logChunks.join('');
+        for (const secret of [SCRAPER_KEY, encodeURIComponent(SCRAPER_KEY), mockEnv.YELP_API_KEY!, '2125553333']) {
+          expect(text).not.toContain(secret);
+        }
+      });
+
+      it('is the only status that logs it: other proxy failures degrade quietly', async () => {
+        for (const status of [429, 500, 404]) {
+          fetchMock.mockImplementation(async () => new Response('Request failed.', { status }));
+          expect(await lookupYelp(PHONE)).toEqual(DEGRADED);
+        }
+
+        expect(loggedLines()).toEqual([]);
+      });
     });
   });
 

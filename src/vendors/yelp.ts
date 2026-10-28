@@ -1,5 +1,6 @@
 import { getCached, setCached } from '../cache/cache.js';
 import { env } from '../env.js';
+import { vendorLog } from '../lib/vendorLog.js';
 
 export interface YelpBusiness {
   name: string;
@@ -27,12 +28,10 @@ const PROXY_TIMEOUT_MS = 2_500;
 
 // The status code of a proxied response is ScraperAPI's: 401 a bad ScraperAPI key, 403 the monthly
 // credits used up, 429 too many concurrent requests, 500 a request that failed after its retries
-// (not charged); 200 and 404 are the target's. Only 401 and 403 are operational errors worth
-// surfacing; the rest degrade like any vendor miss.
-const SCRAPERAPI_AUTH_HINT: Record<number, string> = {
-  401: 'invalid SCRAPERAPI_KEY',
-  403: 'monthly credits exhausted',
-};
+// (not charged); 200 and 404 are the target's. A 401 is a broken configuration and stops the lookup.
+// A 403 is a capacity limit: the lookup carries on without Yelp (the payer still gets a dossier, with
+// no business) and an error-level log line tells the operator to upgrade. The rest degrade quietly,
+// like any vendor miss.
 
 // Stored in the business field for a confirmed "no business at this number", so a repeat call is a
 // cache hit instead of another paid Yelp call. A match is stored as the YelpBusiness itself.
@@ -111,8 +110,12 @@ export async function lookupYelp(phoneE164: string): Promise<YelpLookup> {
   // Bad credentials do not fix themselves, and degrading would hide them behind "no business" on
   // every call. Surface them loudly, with the status only: never the response body or the request
   // (the proxied URL holds the ScraperAPI key).
-  if (proxied && SCRAPERAPI_AUTH_HINT[status]) {
-    throw new Error(`ScraperAPI auth failed (HTTP ${status}): ${SCRAPERAPI_AUTH_HINT[status]}`);
+  if (proxied && status === 401) throw new Error('ScraperAPI auth failed (HTTP 401): invalid SCRAPERAPI_KEY');
+  // Credits used up: degrade, not cached (it says nothing about the number), but not quietly. This is
+  // logged on every lookup that needed Yelp, so it is the line to alert on.
+  if (proxied && status === 403) {
+    vendorLog.error({ vendor: 'scraperapi', status }, 'scraperapi_credits_exhausted');
+    return DEGRADED;
   }
   if (!proxied && (status === 401 || status === 403)) throw new Error(`Yelp authentication failed (HTTP ${status})`);
   if (proxied && body?.error?.code === 'TOKEN_INVALID') {
