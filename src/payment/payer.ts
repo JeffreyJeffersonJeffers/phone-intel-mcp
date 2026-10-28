@@ -6,7 +6,11 @@ import type { FastifyRequest } from 'fastify';
 const payers = new WeakMap<FastifyRequest, string>();
 
 export function setPayer(request: FastifyRequest, address: string): void {
-  payers.set(request, address.toLowerCase());
+  const wallet = address.toLowerCase();
+  payers.set(request, wallet);
+  // From here on every line the request logs says who is paying, by the last 6 characters only:
+  // enough to tell wallets apart in the logs, not an address anyone could look up or paste.
+  request.log = request.log.child({ wallet_address_last6: wallet.slice(-6) });
 }
 
 export function payerOf(request: FastifyRequest): string | undefined {

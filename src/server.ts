@@ -10,6 +10,7 @@ import { env } from './env.js';
 import { healthRoute } from './http/healthRoute.js';
 import { lookupRoute, REJECTION_MESSAGES } from './http/lookupRoute.js';
 import { mcpRoute } from './http/mcpRoute.js';
+import { safeErrorMessage } from './lib/logSafe.js';
 import { createWalletRateLimiter, walletRateLimit } from './middleware/rateLimit.js';
 import { requirePayment, settleOnSuccess } from './payment/x402Middleware.js';
 
@@ -20,11 +21,45 @@ export interface ServerOptions {
   logStream?: Writable;
 }
 
-// Fastify's default 404 line echoes the whole request path, which can carry a phone number.
+// Fastify's own log lines are the part of the request log we don't write. Three of its defaults are
+// unsafe here: the 404 line echoes the whole request path, which can carry a phone number, and the
+// error lines write the whole error object (stack, and for some errors the path or a snippet of the
+// body) plus its message. So those say the status, the error code and a redacted message instead.
 class PhoneSafeLogController extends LogController {
+  constructor() {
+    // Logs say request_id, not Fastify's default reqId. (Set here: the top-level option is deprecated.)
+    super({ requestIdLogLabel: 'request_id' });
+  }
+
   override routeNotFound(request: FastifyRequest): void {
     if (this.isLogDisabled(request)) return;
     request.log.info('route not found');
+  }
+
+  override defaultErrorLog(error: Error, request: FastifyRequest, reply: FastifyReply): void {
+    if (this.isLogDisabled(request)) return;
+    const fields = {
+      status: reply.statusCode,
+      error_code: (error as FastifyError).code,
+      error_message: safeErrorMessage(error),
+    };
+    // request.log, not reply.log: it is the one that knows the paying wallet.
+    if (reply.statusCode >= 500) request.log.error(fields, 'request error');
+    else request.log.info(fields, 'request error');
+  }
+
+  override requestCompleted(
+    error: Error | null | undefined,
+    request: FastifyRequest,
+    reply: FastifyReply,
+    metadata?: Record<string, unknown>,
+  ): void {
+    if (!error) return super.requestCompleted(error, request, reply, metadata);
+    if (this.isLogDisabled(request)) return;
+    request.log.error(
+      { status: reply.statusCode, error_message: safeErrorMessage(error), response_time_ms: Math.round(reply.elapsedTime) },
+      'request errored',
+    );
   }
 }
 

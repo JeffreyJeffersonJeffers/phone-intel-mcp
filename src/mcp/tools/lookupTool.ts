@@ -4,8 +4,10 @@ import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 import { composeDossier } from '../../dossier/compose.js';
 import type { Dossier } from '../../dossier/types.js';
+import { safeErrorMessage } from '../../lib/logSafe.js';
 import { normalizePhone } from '../../lib/phone.js';
 import { hashPhone } from '../../lib/phoneHash.js';
+import { lookupLogFields } from '../../middleware/requestLog.js';
 
 export const LOOKUP_TOOL_NAME = 'phone_intel.lookup';
 
@@ -47,8 +49,6 @@ const dossierSchema = z.object({
   }),
 }) satisfies z.ZodType<Dossier>;
 
-const describeError = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
 // A tool error is a normal result with isError set, so one bad lookup does not break the MCP
 // session. The text is only ever one of our codes, never an upstream message.
 const toolError = (code: 'invalid_phone' | 'not_us_number' | 'vendor_failure' | 'internal_error'): CallToolResult => ({
@@ -58,13 +58,17 @@ const toolError = (code: 'invalid_phone' | 'not_us_number' | 'vendor_failure' | 
 
 export interface LookupToolOptions {
   priceUsdc: string;
-  // Request-scoped: it carries the request id, and adapter details go here instead of to the client.
+  // Request-scoped: it carries the request id (and the paying wallet), and adapter details go here
+  // instead of to the client.
   log: FastifyBaseLogger;
+  // Milliseconds since the HTTP request arrived, for the log line's latency_ms.
+  latencyMs: () => number;
 }
 
 // Same order as GET /lookup/:phone: validate first (a rejected number makes no vendor call), then
-// compose. Logs carry phone_hash, never the phone.
-export function registerLookupTool(server: McpServer, { priceUsdc, log }: LookupToolOptions): void {
+// compose. Same log line too (lookupLogFields): phone_hash, never the phone, and error text only
+// through safeErrorMessage.
+export function registerLookupTool(server: McpServer, { priceUsdc, log, latencyMs }: LookupToolOptions): void {
   server.registerTool(
     LOOKUP_TOOL_NAME,
     {
@@ -77,24 +81,50 @@ export function registerLookupTool(server: McpServer, { priceUsdc, log }: Lookup
     async ({ phone }): Promise<CallToolResult> => {
       const normalized = normalizePhone(phone);
       if ('error' in normalized) {
-        log.info({ error_code: normalized.error }, 'mcp lookup rejected');
+        log.info(
+          {
+            ...lookupLogFields({ status: 400, latencyMs: latencyMs(), phoneHash: null, cacheHits: [] }),
+            error_code: normalized.error,
+          },
+          'mcp lookup rejected',
+        );
         return toolError(normalized.error);
       }
 
       const phoneHash = hashPhone(normalized.e164);
       try {
         const dossier = await composeDossier(normalized.e164);
-        log.info({ lookup_id: dossier.meta.lookup_id, phone_hash: phoneHash }, 'mcp lookup completed');
+        log.info(
+          {
+            ...lookupLogFields({
+              status: 200,
+              latencyMs: latencyMs(),
+              phoneHash,
+              cacheHits: dossier.meta.cached_fields,
+            }),
+            lookup_id: dossier.meta.lookup_id,
+          },
+          'mcp lookup completed',
+        );
         return { content: [{ type: 'text', text: JSON.stringify(dossier) }], structuredContent: { ...dossier } };
       } catch (err) {
         if (err instanceof AggregateError) {
           log.error(
-            { phone_hash: phoneHash, adapter_errors: err.errors.map(describeError) },
+            {
+              ...lookupLogFields({ status: 502, latencyMs: latencyMs(), phoneHash, cacheHits: [] }),
+              adapter_errors: err.errors.map(safeErrorMessage),
+            },
             'mcp lookup failed: vendor failure',
           );
           return toolError('vendor_failure');
         }
-        log.error({ err, phone_hash: phoneHash }, 'mcp lookup failed: unexpected error');
+        log.error(
+          {
+            ...lookupLogFields({ status: 500, latencyMs: latencyMs(), phoneHash, cacheHits: [] }),
+            error_message: safeErrorMessage(err),
+          },
+          'mcp lookup failed: unexpected error',
+        );
         return toolError('internal_error');
       }
     },

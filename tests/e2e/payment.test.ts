@@ -603,7 +603,7 @@ describe('payment logging', () => {
     const statuses = logs.lines().flatMap((line) => (typeof line.payment === 'string' ? [line.payment] : []));
     expect(statuses).toEqual(['missing', 'rejected', 'verified', 'settled']);
     for (const line of logs.lines().filter((l) => 'payment' in l)) {
-      expect(line.reqId).toEqual(expect.any(String));
+      expect(line.request_id).toEqual(expect.any(String));
     }
     const text = logs.text();
     expect(text).not.toContain('5165551234');

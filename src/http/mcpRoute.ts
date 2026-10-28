@@ -74,7 +74,7 @@ export const mcpRoute: FastifyPluginAsync<McpRouteOptions> = async (
       return reply.code(400).send(jsonRpcError(-32600, 'Invalid Request: batch requests are not supported'));
     }
 
-    const mcp = createMcpServer({ priceUsdc, log: request.log });
+    const mcp = createMcpServer({ priceUsdc, log: request.log, latencyMs: () => Math.round(reply.elapsedTime) });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
