@@ -11,13 +11,16 @@ const TTL_SECONDS: Record<CacheField, number> = {
   hours: HOUR,
 };
 
-// Module-level singleton, created on first use. postgres.js connects lazily; idle_timeout
-// lets pooled connections close so a quiet process (or test run) can exit.
+// Module-level singleton, created on first use. postgres.js connects lazily.
+// - ssl 'require': postgres.js defaults to plaintext; cached phone/business data must not
+//   cross the internet unencrypted. 'require' enforces TLS without strict CA verification.
+// - connect_timeout (s): a paused free-tier Supabase project should fail fast, not hang 30s.
+// - idle_timeout (s): lets pooled connections close so a quiet process (or test run) can exit.
 let client: postgres.Sql | undefined;
 function db(): postgres.Sql {
   if (!client) {
     if (!env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
-    client = postgres(env.DATABASE_URL, { idle_timeout: 20 });
+    client = postgres(env.DATABASE_URL, { ssl: 'require', connect_timeout: 5, idle_timeout: 20 });
   }
   return client;
 }

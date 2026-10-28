@@ -7,7 +7,7 @@ import { env } from '../../src/env.js';
 if (!env.DATABASE_URL) {
   throw new Error('DATABASE_URL is not set: integration tests need the real Supabase database (.env.local)');
 }
-const sql = postgres(env.DATABASE_URL, { max: 2 });
+const sql = postgres(env.DATABASE_URL, { ssl: 'require', max: 2 });
 
 const P1 = '+15165551234';
 const P2 = '+15165551235';
