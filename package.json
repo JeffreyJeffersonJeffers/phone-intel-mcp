@@ -1,0 +1,30 @@
+{
+  "name": "phone-intel-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@flydotio/dockerfile": "^0.7.14",
+    "@types/node": "^20.19.43",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  },
+  "dependencies": {
+    "@googlemaps/google-maps-services-js": "^3.4.2",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "fastify": "^4.29.1",
+    "pino": "^9.14.0",
+    "postgres": "^3.4.9",
+    "twilio": "^6.2.0"
+  }
+}
