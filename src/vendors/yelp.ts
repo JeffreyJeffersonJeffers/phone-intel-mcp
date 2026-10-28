@@ -69,11 +69,12 @@ export async function lookupYelp(phoneE164: string): Promise<YelpLookup> {
   const hit = await getCached<YelpBusiness | CachedMiss>(phoneE164, 'business');
   if (hit) return 'matched' in hit ? { business: null, cached: true } : { business: hit, cached: true };
 
-  // "+" must be percent-encoded: left bare in a query string it decodes to a space.
-  const query = `phone=${encodeURIComponent(phoneE164)}`;
-  const url = proxy ? `${proxy.url.replace(/\/+$/, '')}/api/yelp?${query}` : `${ENDPOINT}?${query}`;
+  // On the direct path, "+" must be percent-encoded in the query (bare "+" decodes to a space).
+  // On the proxied path, the phone is sent in a header, not the query string: the proxy's URL
+  // reaches Vercel's access logs, and we do not log raw phones anywhere.
+  const url = proxy ? `${proxy.url.replace(/\/+$/, '')}/api/yelp` : `${ENDPOINT}?phone=${encodeURIComponent(phoneE164)}`;
   const headers: Record<string, string> = proxy
-    ? { 'X-Proxy-Auth': proxy.auth, Accept: 'application/json' }
+    ? { 'X-Proxy-Auth': proxy.auth, 'X-Phone-E164': phoneE164, Accept: 'application/json' }
     : { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' };
 
   // One AbortController covers connect, headers and body read: fetch rejects with an AbortError

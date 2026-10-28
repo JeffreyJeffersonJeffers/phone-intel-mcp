@@ -269,7 +269,7 @@ describe('lookupYelp through the Vercel proxy', () => {
   const PROXY_URL = 'https://proxy.example.test';
   const PROXY_AUTH = 'proxy/auth+secret=1';
   const YELP_URL = 'https://api.yelp.com/v3/businesses/search/phone?phone=%2B12125553333';
-  const PROXY_REQUEST_URL = `${PROXY_URL}/api/yelp?phone=%2B12125553333`;
+  const PROXY_REQUEST_URL = `${PROXY_URL}/api/yelp`;
 
   beforeEach(() => {
     mockEnv.YELP_PROXY_URL = PROXY_URL;
@@ -290,15 +290,30 @@ describe('lookupYelp through the Vercel proxy', () => {
     );
 
   describe('the request', () => {
-    it('is a GET to <proxy>/api/yelp?phone=<encoded> with X-Proxy-Auth and Accept, and no other header', async () => {
+    it('is a GET to <proxy>/api/yelp with X-Proxy-Auth, X-Phone-E164 and Accept, and no other header', async () => {
       mockYelp({ businesses: [] });
       await lookupYelp(PHONE);
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(String(url)).toBe(PROXY_REQUEST_URL); // "+" is %2B, not a bare "+"
+      expect(String(url)).toBe(PROXY_REQUEST_URL); // no query string: the phone is in a header
       expect(init.method ?? 'GET').toBe('GET');
-      expect(init.headers).toEqual({ 'X-Proxy-Auth': PROXY_AUTH, Accept: 'application/json' });
+      expect(init.headers).toEqual({
+        'X-Proxy-Auth': PROXY_AUTH,
+        'X-Phone-E164': PHONE,
+        Accept: 'application/json',
+      });
+    });
+
+    it('never puts the phone in the proxy URL (Vercel logs the path)', async () => {
+      mockYelp({ businesses: [] });
+      await lookupYelp(PHONE);
+
+      const [url] = fetchMock.mock.calls[0] as [string];
+      const digits = PHONE.replace(/\D/g, '');
+      expect(String(url)).not.toContain(digits);
+      expect(String(url)).not.toContain(encodeURIComponent(PHONE));
+      expect(String(url)).not.toContain(PHONE);
     });
 
     // The proxy adds the Yelp key itself. Sending ours would put it in front of Vercel for nothing.
