@@ -165,7 +165,8 @@ Errors other than 402 share one envelope: `{ "error": { "code": "...", "message"
 - **100 paid lookups per minute per paying wallet**, rolling window, counted across REST and MCP together.
 - **One request in flight per wallet.** Use several wallets for parallelism, or queue.
 - **v1 accepts EOA (externally-owned account) signatures only.** Smart-contract wallets (ERC-1271 / 6492: Safe, Coinbase Smart Wallet, Argent, etc.) are not supported in v1. A payment whose signature is not a 65-byte signature by the wallet it names is rejected with `402 invalid_exact_evm_payload_signature` before anything is run.
-- **p95 target under 2 seconds** for the lookup itself (each vendor is bounded at 900 ms and a slow one degrades rather than blocking). Payment verification and settlement are extra round trips on top of that.
+- **p95 target under 2 seconds** for the lookup itself. Each vendor is bounded at 900 ms and a slow one degrades rather than blocking, with one exception: Yelp is bounded at 2.5 s (see the next point), so a number that has a business can take up to about 3.4 s. Payment verification and settlement are extra round trips on top of that.
+- **v1 routes Yelp calls through ScraperAPI**, because Yelp blocks datacenter IPs. Each uncached lookup uses one ScraperAPI credit; a repeat lookup of the same number is served from the cache and uses none. ScraperAPI's free plan is only 1,000 credits and 5 concurrent connections (the 5,000-credit figure is a 7-day trial), so v1 on the free plan serves roughly that many uncached lookups. When the credits run out, lookups that need Yelp fail with `502 vendor_failure` (not charged) until they renew or the plan is upgraded.
 - `GET /health`, MCP `initialize` and `tools/list` are free and never rate limited.
 
 ## Health

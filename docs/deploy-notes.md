@@ -13,6 +13,14 @@ Nothing here is run by the build; each step is a person's decision.
    Generate it once and set it as a secret; keep it stable, because changing it changes every `phone_hash`
    and breaks correlation with older logs.
    `openssl rand -hex 32`
+
+   Also **`SCRAPERAPI_KEY`**. Yelp answers 403 to Fly's (datacenter) addresses, so on Fly the Yelp calls go
+   through ScraperAPI; without the key they go direct and Yelp refuses them (the lookup then fails with a
+   Yelp authentication error, see below). Sign up for a key at https://www.scraperapi.com (no card needed) and set it as a secret. **Mind the
+   quota:** ScraperAPI's pricing page gives a 7-day trial of 5,000 credits, and the free plan after that is
+   **1,000 credits with at most 5 concurrent connections**, not 5,000 a month. Paid plans start at Hobby,
+   $49/month for 100,000 credits and 20 concurrent threads. Nothing else needs to change: the server
+   starts without it, which is right for local development from a home connection.
 3. **Migrations.** The Task 6 `enrichment_*` columns must already be applied to the production database.
 4. **One machine.** Deploy with `--ha=false`. The rate limiter, the per-wallet in-flight slots and the
    replay-nonce ledger are all in memory and single-instance; a second machine needs a shared store
@@ -52,3 +60,34 @@ necessary, not proof that `/verify` and `/settle` accept our payload.
 - `payment: "facilitator_error"` at error level: the facilitator is failing, not rejecting payments.
 - `latency_ms` on the lookup line is measured in the handler: it includes payment verification and
   excludes settlement. Fastify's own `request completed` line (`responseTime`) includes settlement.
+
+## ScraperAPI (the Yelp proxy)
+
+With `SCRAPERAPI_KEY` set, each uncached Yelp lookup is one GET to `https://api.scraperapi.com/` with our
+Yelp URL in `url=` and `keep_headers=true`, which makes ScraperAPI forward our `Authorization: Bearer <Yelp
+key>`. It costs one credit; a cache hit costs none. Things that follow from how it works
+(https://docs.scraperapi.com/responses-and-formats/api-status-codes):
+
+- **Its status codes are its own.** `401` is a bad `SCRAPERAPI_KEY`; `403` is the monthly credits used up;
+  `429` is more concurrent requests than the plan allows (5 on the free plan: a burst of more than five
+  uncached business lookups at once will lose the extra ones to "no business", silently, because a `429`
+  degrades); `500` means it failed after its own retries (not charged); `200` and `404` are the target's. Our errors: `ScraperAPI auth failed (HTTP 401): invalid
+  SCRAPERAPI_KEY` and `ScraperAPI auth failed (HTTP 403): monthly credits exhausted`. Both appear in the
+  `adapter_errors` of a `lookup failed: vendor failure` log line.
+- **When the credits run out every lookup that needs Yelp fails with `502 vendor_failure`** (not charged to
+  the payer) until the month resets or the plan is upgraded. That is the loud-failure design applied to a
+  vendor key; if availability matters more than loudness, change `403` to degrade in `src/vendors/yelp.ts`.
+  Watch the credit balance in the ScraperAPI dashboard.
+- **A revoked or broken Yelp key may not be loud any more.** ScraperAPI only documents `200` and `404` as the
+  target's answers; any other target failure it retries for up to 70 s and then reports as `500`. Our limit
+  for a proxied call is 2.5 s, so such a call times out and the lookup degrades to "no business". We still
+  throw on a Yelp `TOKEN_INVALID` body if one comes through, but do not count on it. If business matches
+  suddenly vanish, test the Yelp key directly from a machine Yelp does not block.
+- **A timeout costs a credit.** ScraperAPI charges for a request we cancel before its 70 s window ends, and
+  its median latency (about 2 s) is close to our 2.5 s limit, so some credits buy nothing.
+- **Latency.** A number with a business can now take up to 2.5 s (Yelp) + 0.9 s (Google) = 3.4 s, over the
+  2 s target.
+- **Privacy.** ScraperAPI sees the phone number being looked up (it is in the Yelp URL) and our Yelp API
+  key, in addition to Yelp.
+
+After deploy, look up a number that has a Yelp listing and check that `business_match` is not `null`.
