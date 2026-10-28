@@ -478,17 +478,21 @@ describe('lookupYelp through ScraperAPI', () => {
           }),
       );
 
-    it('is 2.5 s, not 900 ms, and a timeout degrades without caching', async () => {
-      hangUntilAborted();
-      const started = Date.now();
-      const result = await lookupYelp(PHONE);
-      const elapsed = Date.now() - started;
+    it(
+      'is 5 s, not 900 ms, and a timeout degrades without caching',
+      async () => {
+        hangUntilAborted();
+        const started = Date.now();
+        const result = await lookupYelp(PHONE);
+        const elapsed = Date.now() - started;
 
-      expect(result).toEqual(DEGRADED);
-      expect(elapsed).toBeGreaterThanOrEqual(2450);
-      expect(elapsed).toBeLessThan(3200);
-      expect(await getCached(PHONE, 'business')).toBeNull();
-    });
+        expect(result).toEqual(DEGRADED);
+        expect(elapsed).toBeGreaterThanOrEqual(4950);
+        expect(elapsed).toBeLessThan(5700);
+        expect(await getCached(PHONE, 'business')).toBeNull();
+      },
+      10_000,
+    );
 
     it('lets a response that takes 1.5 s (too slow for a direct call) through', async () => {
       fetchMock.mockImplementation(async () => {

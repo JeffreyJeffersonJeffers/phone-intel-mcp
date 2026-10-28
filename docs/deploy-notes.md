@@ -90,12 +90,12 @@ key>`. It costs one credit; a cache hit costs none. Things that follow from how 
   rating, so treat the line as an incident, not noise.
 - **A revoked or broken Yelp key may not be loud any more.** ScraperAPI only documents `200` and `404` as the
   target's answers; any other target failure it retries for up to 70 s and then reports as `500`. Our limit
-  for a proxied call is 2.5 s, so such a call times out and the lookup degrades to "no business". We still
+  for a proxied call is 5 s, so such a call times out and the lookup degrades to "no business". We still
   throw on a Yelp `TOKEN_INVALID` body if one comes through, but do not count on it. If business matches
   suddenly vanish, test the Yelp key directly from a machine Yelp does not block.
 - **A timeout costs a credit.** ScraperAPI charges for a request we cancel before its 70 s window ends, and
-  its median latency (about 2 s) is close to our 2.5 s limit, so some credits buy nothing.
-- **Latency.** A number with a business can now take up to 2.5 s (Yelp) + 0.9 s (Google) = 3.4 s, over the
+  its median latency (about 2 s) is well under our 5 s limit now.
+- **Latency.** A number with a business can now take up to 5 s (Yelp) + 0.9 s (Google) = 5.9 s, over the
   2 s target.
 - **Privacy.** ScraperAPI sees the phone number being looked up (it is in the Yelp URL) and our Yelp API
   key, in addition to Yelp.

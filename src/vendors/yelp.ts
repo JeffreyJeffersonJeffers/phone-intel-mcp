@@ -24,7 +24,7 @@ const TIMEOUT_MS = 900;
 // 2 s, so the limit is longer than a direct call's. (ScraperAPI charges for a request that we cancel
 // before its own 70 s retry window ends, so a timeout still costs a credit.)
 const SCRAPERAPI_ENDPOINT = 'https://api.scraperapi.com/';
-const PROXY_TIMEOUT_MS = 2_500;
+const PROXY_TIMEOUT_MS = 5_000;
 
 // The status code of a proxied response is ScraperAPI's: 401 a bad ScraperAPI key, 403 the monthly
 // credits used up, 429 too many concurrent requests, 500 a request that failed after its retries
@@ -101,8 +101,16 @@ export async function lookupYelp(phoneE164: string): Promise<YelpLookup> {
     // read from whatever JSON came back. Not for 401/403: those are ScraperAPI's own and have no
     // Yelp body.
     if (ok || (proxied && status !== 401 && status !== 403)) body = (await response.json()) as typeof body;
-  } catch {
-    return DEGRADED; // timeout, network error, or a body that is not JSON
+  } catch (err) {
+    // Log Yelp timeouts (abort) so we can tell "no business match" from "proxy was too slow".
+    // Network and non-JSON errors degrade silently as before.
+    if (err instanceof Error && err.name === 'AbortError') {
+      vendorLog.warn(
+        { vendor: 'yelp', proxied, timeout_ms: proxied ? PROXY_TIMEOUT_MS : TIMEOUT_MS },
+        'yelp_timeout',
+      );
+    }
+    return DEGRADED;
   } finally {
     clearTimeout(timer);
   }
