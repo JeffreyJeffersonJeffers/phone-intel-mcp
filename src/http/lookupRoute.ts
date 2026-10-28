@@ -3,7 +3,7 @@ import { composeDossier } from '../dossier/compose.js';
 import { normalizePhone } from '../lib/phone.js';
 import { hashPhone } from '../lib/phoneHash.js';
 
-const REJECTION_MESSAGES = {
+export const REJECTION_MESSAGES = {
   invalid_phone: 'Phone number is malformed or missing',
   not_us_number: 'Only US (+1) phone numbers are supported',
 } as const;

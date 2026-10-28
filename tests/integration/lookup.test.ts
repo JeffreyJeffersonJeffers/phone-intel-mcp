@@ -96,6 +96,10 @@ describe('GET /lookup/:phone', () => {
     ['path traversal', '..%2F..%2Fetc%2Fpasswd'],
     ['over-long input', `%2B1${'5'.repeat(40)}`],
     ['an empty value', ''],
+    // Rejected by Fastify's router before any handler runs, so these need the frameworkErrors hook.
+    ['bad percent-encoding (FST_ERR_BAD_URL)', '%'],
+    ['bad percent-encoding after a valid number (FST_ERR_BAD_URL)', '%2B15165551234%ZZ'],
+    ['a value past maxParamLength (FST_ERR_MAX_PARAM_LENGTH)', '1'.repeat(101)],
   ])('returns 400 invalid_phone for %s and calls no vendor', async (_label, param) => {
     server = buildServer();
 
@@ -141,6 +145,18 @@ describe('GET /lookup/:phone', () => {
 });
 
 describe('lookup logging', () => {
+  it('never writes the raw phone to the logs when Fastify rejects the URL itself', async () => {
+    const logs = captureLogs();
+    server = buildServer({ logStream: logs.stream });
+
+    await server.inject({ method: 'GET', url: '/lookup/%2B15165551234%ZZ' });
+    await server.inject({ method: 'GET', url: `/lookup/${'5165551234'.repeat(11)}` });
+
+    const frameworkLogs = logs.lines().filter((line) => line.framework_code !== undefined);
+    expect(frameworkLogs.map((line) => line.framework_code)).toEqual(['FST_ERR_BAD_URL', 'FST_ERR_MAX_PARAM_LENGTH']);
+    expect(logs.text()).not.toContain('5165551234');
+  });
+
   it('logs one completion line with lookup_id, phone_hash and latency_ms', async () => {
     const logs = captureLogs();
     server = buildServer({ logStream: logs.stream });
