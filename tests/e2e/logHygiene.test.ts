@@ -159,6 +159,16 @@ describe('the lookup log line', () => {
     });
   });
 
+  it('reports how long the request really took as latency_ms', async () => {
+    compose.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve(DOSSIER), 50)));
+
+    await paidGet(await pay());
+
+    const latency = logs.lookupLines()[0]!.latency_ms as number;
+    expect(latency).toBeGreaterThanOrEqual(40);
+    expect(latency).toBeLessThan(5_000);
+  });
+
   it('logs only the last 6 characters of the wallet, never the address or the payment', async () => {
     const header = await pay();
 
@@ -257,6 +267,16 @@ describe('the MCP lookup log line', () => {
     });
     expect(new Set(logs.lines().map((l) => l.request_id)).size).toBe(1);
     expectNoPhone(logs.text());
+  });
+
+  it('reports how long the request really took as latency_ms', async () => {
+    compose.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve(DOSSIER), 50)));
+
+    await mcpCall(PHONE, await pay());
+
+    const latency = logs.lookupLines()[0]!.latency_ms as number;
+    expect(latency).toBeGreaterThanOrEqual(40);
+    expect(latency).toBeLessThan(5_000);
   });
 
   it('logs a rejected number with a null phone_hash', async () => {
