@@ -71,6 +71,14 @@ export function requirePayment(amountUsdc: UsdcAmount, network: PaymentNetwork):
   };
 }
 
+// For a handler that reports failure inside a 2xx, which settleOnSuccess cannot see (an MCP tool
+// error is HTTP 200 with isError set). Drops the verified payment so it is not settled. The nonce
+// stays claimed, as for any failed call: the client simply signs a new payment.
+export function skipSettlement(request: FastifyRequest): void {
+  if (!verified.delete(request)) return;
+  request.log.info({ payment: 'not_charged' }, 'payment not settled: request failed');
+}
+
 export const settleOnSuccess: onSendAsyncHookHandler = async (request, reply, payload) => {
   const payment = verified.get(request);
   if (!payment) return payload; // unpaid or rejected: the 402 was already sent by the preHandler

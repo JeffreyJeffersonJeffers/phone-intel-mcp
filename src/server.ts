@@ -9,6 +9,7 @@ import Fastify, {
 import { env } from './env.js';
 import { healthRoute } from './http/healthRoute.js';
 import { lookupRoute, REJECTION_MESSAGES } from './http/lookupRoute.js';
+import { mcpRoute } from './http/mcpRoute.js';
 import { requirePayment, settleOnSuccess } from './payment/x402Middleware.js';
 
 const PRICE_USDC = '0.03';
@@ -68,5 +69,7 @@ export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance 
     paid.addHook('onSend', settleOnSuccess);
     paid.register(lookupRoute);
   });
+  // Its own context: the gate here is per MCP message, not per route (see mcpRoute).
+  server.register(mcpRoute, { requirePayment: requireUsdc, priceUsdc: PRICE_USDC });
   return server;
 }
