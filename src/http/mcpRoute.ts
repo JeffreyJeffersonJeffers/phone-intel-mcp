@@ -6,6 +6,9 @@ import { settleOnSuccess, skipSettlement } from '../payment/x402Middleware.js';
 
 export interface McpRouteOptions {
   requirePayment: preHandlerAsyncHookHandler;
+  // Runs right after requirePayment. It meters only a verified payer, so it never touches the free
+  // messages (initialize, tools/list) or a call the gate turned away.
+  rateLimit: preHandlerAsyncHookHandler;
   priceUsdc: string;
 }
 
@@ -54,10 +57,14 @@ const jsonRpcError = (code: number, message: string) => ({ jsonrpc: '2.0', error
 // SSE. That keeps the response a plain Fastify reply, so the x402 onSend hook can settle it. (The
 // SDK's Node transport writes straight to the socket and would bypass onSend.) Logging: the route
 // pattern only, and tool code logs phone_hash. The phone travels in the body, never the URL.
-export const mcpRoute: FastifyPluginAsync<McpRouteOptions> = async (server, { requirePayment, priceUsdc }) => {
+export const mcpRoute: FastifyPluginAsync<McpRouteOptions> = async (
+  server,
+  { requirePayment, rateLimit, priceUsdc },
+) => {
   server.addHook('preHandler', async function (request, reply) {
     if (isLookupCall(request.body)) return requirePayment.call(this, request, reply);
   });
+  server.addHook('preHandler', rateLimit);
   server.addHook('onSend', settleOnSuccess);
 
   server.post('/mcp', async (request, reply) => {

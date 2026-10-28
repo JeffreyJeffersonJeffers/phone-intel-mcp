@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest, onSendAsyncHookHandler, preHandlerAsyncHookHandler } from 'fastify';
 import type { PaymentPayload, PaymentRequirements } from 'x402/types';
+import { setPayer } from './payer.js';
 import {
   buildRequirements,
   getFacilitator,
@@ -114,6 +115,7 @@ export function requirePayment(amountUsdc: UsdcAmount, network: PaymentNetwork):
       network,
       releaseSlot: result.releaseSlot,
     });
+    setPayer(request, result.payer);
     request.log.info({ payment: 'verified' }, 'payment verified');
   };
 }

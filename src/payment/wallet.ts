@@ -136,7 +136,7 @@ export type AdmitPayer = (from: string) => (() => void) | null;
 // is left unused (its nonce released) so the same header can be sent again. On success the caller
 // holds the payer's slot and must call `releaseSlot` once the request is over.
 export type VerifyResult =
-  | { ok: true; payload: PaymentPayload; requirements: PaymentRequirements; releaseSlot: () => void }
+  | { ok: true; payload: PaymentPayload; requirements: PaymentRequirements; payer: string; releaseSlot: () => void }
   | { ok: false; reason: string; facilitatorError?: true; concurrent?: true };
 
 // `resource` goes to the facilitator, a third party. Pass the route pattern, never the request
@@ -201,7 +201,7 @@ export async function verifyPayment(
     if (err instanceof VerifyError) return { ok: false, reason: reasonOf(err.invalidReason, 'verification_failed') };
     return { ok: false, reason: 'verification_failed', facilitatorError: true };
   }
-  return { ok: true, payload, requirements, releaseSlot };
+  return { ok: true, payload, requirements, payer: authorization.from, releaseSlot };
 }
 
 export type SettleResult = { ok: true; header: string } | { ok: false; reason: string; facilitatorError?: true };

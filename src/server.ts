@@ -10,6 +10,7 @@ import { env } from './env.js';
 import { healthRoute } from './http/healthRoute.js';
 import { lookupRoute, REJECTION_MESSAGES } from './http/lookupRoute.js';
 import { mcpRoute } from './http/mcpRoute.js';
+import { createWalletRateLimiter, walletRateLimit } from './middleware/rateLimit.js';
 import { requirePayment, settleOnSuccess } from './payment/x402Middleware.js';
 
 const PRICE_USDC = '0.03';
@@ -62,6 +63,9 @@ export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance 
   // Built here, not inside the plugin below, so a missing WALLET_ADDRESS (or mainnet CDP key)
   // throws from buildServer() at startup instead of surfacing later during plugin loading.
   const requireUsdc = requirePayment(PRICE_USDC, env.NODE_ENV === 'production' ? 'base' : 'base-sepolia');
+  // One allowance per wallet across both paid paths. It must run after requireUsdc, which is what
+  // identifies the wallet; requests that never reach a verified payment are not metered.
+  const limitWallet = walletRateLimit(createWalletRateLimiter());
 
   server.register(healthRoute);
   // Hooks added in this encapsulated context cover every route registered in it, including the
@@ -69,10 +73,11 @@ export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance 
   // /health is registered outside it and stays free.
   server.register(async (paid) => {
     paid.addHook('preHandler', requireUsdc);
+    paid.addHook('preHandler', limitWallet);
     paid.addHook('onSend', settleOnSuccess);
     paid.register(lookupRoute);
   });
   // Its own context: the gate here is per MCP message, not per route (see mcpRoute).
-  server.register(mcpRoute, { requirePayment: requireUsdc, priceUsdc: PRICE_USDC });
+  server.register(mcpRoute, { requirePayment: requireUsdc, rateLimit: limitWallet, priceUsdc: PRICE_USDC });
   return server;
 }
