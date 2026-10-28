@@ -393,6 +393,14 @@ describe('framework errors', () => {
         return 'second';
       },
     ],
+    [
+      'writes the raw response and then also sends (a plain-string warning, not an err)',
+      async (_request: unknown, reply: { raw: { writeHead: (code: number) => void; end: (body: string) => void } }) => {
+        reply.raw.writeHead(200);
+        reply.raw.end('raw');
+        return (reply as unknown as { send: (payload: string) => unknown }).send('second');
+      },
+    ],
   ])('does not log the phone when a handler %s', async (_label, handler) => {
     server.get('/double/:phone', handler);
 
