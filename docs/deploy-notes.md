@@ -71,13 +71,23 @@ key>`. It costs one credit; a cache hit costs none. Things that follow from how 
 - **Its status codes are its own.** `401` is a bad `SCRAPERAPI_KEY`; `403` is the monthly credits used up;
   `429` is more concurrent requests than the plan allows (5 on the free plan: a burst of more than five
   uncached business lookups at once will lose the extra ones to "no business", silently, because a `429`
-  degrades); `500` means it failed after its own retries (not charged); `200` and `404` are the target's. Our errors: `ScraperAPI auth failed (HTTP 401): invalid
-  SCRAPERAPI_KEY` and `ScraperAPI auth failed (HTTP 403): monthly credits exhausted`. Both appear in the
-  `adapter_errors` of a `lookup failed: vendor failure` log line.
-- **When the credits run out every lookup that needs Yelp fails with `502 vendor_failure`** (not charged to
-  the payer) until the month resets or the plan is upgraded. That is the loud-failure design applied to a
-  vendor key; if availability matters more than loudness, change `403` to degrade in `src/vendors/yelp.ts`.
-  Watch the credit balance in the ScraperAPI dashboard.
+  degrades); `500` means it failed after its own retries (not charged); `200` and `404` are the target's.
+- **A bad `SCRAPERAPI_KEY` (`401`) stops the lookup.** It throws `ScraperAPI auth failed (HTTP 401): invalid
+  SCRAPERAPI_KEY`, so every lookup that needs Yelp is a `502 vendor_failure` (not charged to the payer) and the
+  message appears in the `adapter_errors` of a `lookup failed: vendor failure` log line. That is a
+  configuration error to fix, not a capacity limit.
+- **When the credits run out (`403`), Yelp degrades** (`business_match: null`; the number is classified from
+  its line type), the payer is charged as usual, and nothing is cached for the number. **Monitor the Fly logs
+  for the line `scraperapi_credits_exhausted`** (error level, written once per lookup that needed Yelp):
+
+  ```
+  {"level":50,...,"vendor":"scraperapi","status":403,"msg":"scraperapi_credits_exhausted"}
+  ```
+
+  When it appears, upgrade the plan (or wait for the monthly reset) and watch the balance in the
+  ScraperAPI dashboard. It has no `request_id` (it is written beneath the request, by the Yelp adapter);
+  correlate by time. Dossiers served in that state are charged in full and have no business, hours or
+  rating, so treat the line as an incident, not noise.
 - **A revoked or broken Yelp key may not be loud any more.** ScraperAPI only documents `200` and `404` as the
   target's answers; any other target failure it retries for up to 70 s and then reports as `500`. Our limit
   for a proxied call is 2.5 s, so such a call times out and the lookup degrades to "no business". We still
