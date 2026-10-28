@@ -55,11 +55,11 @@ Typed in [`src/dossier/types.ts`](src/dossier/types.ts). Illustrative response (
 ```
 
 - `number_classification`: `business` when a business is found at the number; otherwise from the line type: `consumer_mobile`, `consumer_landline`, `voip`, `toll_free`, or `unknown`.
-- `carrier.type`: `mobile`, `landline`, `voip`, `tollFree`, `unknown`. `caller_name` is `null` when the carrier has no CNAM record (always, for mobile).
+- `carrier.type`: `mobile`, `landline`, `voip`, `tollFree`, `unknown`. `caller_name` is `null` when the carrier has no CNAM record (most US mobile numbers).
 - `business_match` is `null` when no business is found. Its `hours`, `is_open_now` and `place_id` come from Google and are `null` when Google has no match; `rating` is Google's, falling back to Yelp's, and is `null` only if neither has one.
 - `reputation.spam_risk_score` is 0-100 (higher is riskier). `is_dnc_listed` is `null` when unknown.
 - `meta.cached_fields` lists the sections served from cache (`carrier`, `business`, `enrichment`, `hours`, `reputation`). Cached answers are faster; the price is the same.
-- **Degraded sections.** If one vendor times out, you still get a dossier: that section carries neutral defaults (`carrier.type: "unknown"`, `spam_risk_score: 0`, `is_dnc_listed: null`) and you are charged as usual. Treat a zero score with `cached_fields` empty as "no data", not as "clean".
+- **Degraded sections.** If one vendor times out, you still get a dossier: that section carries neutral defaults (`carrier.type: "unknown"`, `spam_risk_score: 0`, `is_dnc_listed: null`) and you are charged as usual. A dossier where both `reputation.spam_risk_score` is `0` and `reputation.is_dnc_listed` is `null` means the reputation vendor returned no usable record for the number (it timed out, or does not know it): treat that as "no data" rather than "clean". (A zero score alone is a legitimate result for a clean number, with or without `cached_fields`.)
 
 ## How payment works (x402)
 
@@ -90,7 +90,7 @@ You never create an account. The server asks for payment; you sign an authorizat
 2. Sign an EIP-3009 `transferWithAuthorization` for exactly those terms (any x402 v1 client library does this) and send the same request again with the result in the **`X-PAYMENT`** header.
 3. The server verifies the payment, runs the lookup, and only on success settles the USDC on-chain. A `200` carries an `X-PAYMENT-RESPONSE` header (base64 JSON) with the transaction hash.
 
-**You are charged only for a 2xx.** A malformed number, a vendor failure, a rate-limit or concurrency rejection never settles, so no USDC moves. An authorization is single-use and valid for about a minute: after any non-2xx, sign a fresh one rather than resending it (resending a used one gets `402 payment_already_used`). The paying wallet needs USDC on Base and nothing else; the facilitator pays gas.
+**You are charged only for a 2xx.** A malformed number, a vendor failure, a rate-limit or concurrency rejection never settles, so no USDC moves. An authorization is single-use and valid for about a minute: after a non-2xx, sign a fresh one rather than resending it (resending a used one gets `402 payment_already_used`). The one exception is `429 concurrent_request`, which turns the request away before it is used, so the same header can be resent. The paying wallet needs USDC on Base and nothing else; the facilitator pays gas.
 
 ## From an MCP client
 
@@ -151,7 +151,7 @@ curl -i -H "X-PAYMENT: $PAYMENT" 'https://phone-intel-mcp.fly.dev/lookup/%2B1516
 |---|---|---|---|---|
 | 400 | `invalid_phone` | Missing, malformed, or not a valid number | No | Fix the input |
 | 400 | `not_us_number` | A valid number outside +1 | No | US only |
-| 402 | `payment_required` | No valid payment. The body is the x402 challenge above, not the envelope below; its `error` string says why: `X-PAYMENT header is required`, `invalid_payment_header`, `invalid_network`, `invalid_exact_evm_payload_authorization_value`, `payment_already_used`, `insufficient_funds`, `settlement_failed`, ... | No | Sign a fresh payment for the terms in the body |
+| 402 | (none: the x402 challenge) | No valid payment. The body is the x402 challenge above, not the envelope below, and has no `error.code`; its plain `error` string says why: `X-PAYMENT header is required`, `invalid_payment_header`, `invalid_network`, `invalid_exact_evm_payload_authorization_value`, `payment_already_used`, `insufficient_funds`, `invalid_exact_evm_payload_signature`, `settlement_failed`, ... | No | Sign a fresh payment for the terms in the body |
 | 429 | `rate_limited` | Over 100 paid lookups in a rolling minute for your wallet | No | Wait `retry_after_seconds` (also `Retry-After`), then sign a fresh payment |
 | 429 | `concurrent_request` | Your wallet already has a lookup in flight | No | Wait `retry_after_seconds` (2), then resend; the same payment header still works |
 | 502 | `vendor_failure` | A vendor failed hard, e.g. the service's own credentials for it were rejected. (Timeouts and vendor 5xx degrade that section instead of failing the call.) | No | Retry later |
@@ -164,6 +164,7 @@ Errors other than 402 share one envelope: `{ "error": { "code": "...", "message"
 - **US numbers only** (+1). Anything else is `400 not_us_number`.
 - **100 paid lookups per minute per paying wallet**, rolling window, counted across REST and MCP together.
 - **One request in flight per wallet.** Use several wallets for parallelism, or queue.
+- **Sign with an ordinary wallet key (an EOA).** Smart-contract wallets are not supported in v1: a payment signed by a contract wallet is not checked locally, and one that happens to carry a plain 65-byte signature is rejected as `invalid_exact_evm_payload_signature`.
 - **p95 target under 2 seconds** for the lookup itself (each vendor is bounded at 900 ms and a slow one degrades rather than blocking). Payment verification and settlement are extra round trips on top of that.
 - `GET /health`, MCP `initialize` and `tools/list` are free and never rate limited.
 
