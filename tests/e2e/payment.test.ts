@@ -347,6 +347,20 @@ describe('rejected payments', () => {
     expect(compose).not.toHaveBeenCalled();
   });
 
+  // validAfter is read as a BigInt for the local signature check, so it gets the same digits-only gate.
+  it.each(['1e5', '1.0', '', '0x10'])('rejects a non-decimal validAfter %j with 402', async (validAfter) => {
+    server = buildServer();
+    const header = mutateAuthorization(await pay(), (auth) => {
+      auth.validAfter = validAfter;
+    });
+
+    const res = await paidGet(server, header);
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).toMatchObject({ error: 'invalid_payment_header' });
+    expect(facilitator.verify).not.toHaveBeenCalled();
+  });
+
   it('rejects a non-decimal validBefore with 402', async () => {
     server = buildServer();
     const header = mutateAuthorization(await pay(), (auth) => {
@@ -408,6 +422,124 @@ describe('payment replay', () => {
     expect(responses.filter((r) => r.statusCode === 402)).toHaveLength(2);
     expect(compose).toHaveBeenCalledTimes(1);
     expect(facilitator.settle).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The in-flight cap below is keyed by the `from` address in the header, which anyone can write: payer
+// addresses are public on-chain. Without a check, junk-signature requests naming a victim's address
+// keep the victim's slot taken and every real request from them gets 429 (a cheap, sustained denial
+// of service). So for an ordinary wallet (a 65-byte ECDSA signature) the signature is checked
+// locally, before the nonce is claimed and before the slot is taken. A signature of any other length
+// is a smart-contract wallet (ERC-1271 / ERC-6492), which can't be checked without an on-chain call:
+// those go to the facilitator as before, and a smart-wallet payer can still be griefed in v1.
+describe('payer authentication before the slot', () => {
+  const newKey = () => `0x${randomBytes(32).toString('hex')}`;
+  const decode = (header: string) => JSON.parse(Buffer.from(header, 'base64').toString());
+  const encode = (payment: unknown) => Buffer.from(JSON.stringify(payment)).toString('base64');
+  const fromOf = (header: string): string => decode(header).payload.authorization.from;
+  const signatureOf = (header: string): string => decode(header).payload.signature;
+  const withSignature = (header: string, signature: string) => {
+    const payment = decode(header);
+    payment.payload.signature = signature;
+    return encode(payment);
+  };
+  // A header that names `victim` as the payer but was signed by someone else.
+  const forgedAs = async (victim: string) =>
+    mutateAuthorization(await pay({ payerPrivateKey: newKey() }), (auth) => {
+      auth.from = victim;
+    });
+
+  it('rejects a payment whose signature is not from the payer it names, without taking the payer slot', async () => {
+    server = buildServer();
+    const victimHeader = await pay({ payerPrivateKey: newKey() });
+    const forged = await forgedAs(fromOf(victimHeader));
+    // If the forgery reached the facilitator it would sit there holding the victim's slot.
+    let release!: (verdict: unknown) => void;
+    const stuck = new Promise((resolve) => (release = resolve));
+    facilitator.verify.mockImplementation(async (payload: { payload: { signature: string } }) =>
+      payload.payload.signature === signatureOf(forged) ? stuck : { isValid: true, payer: PAYER },
+    );
+
+    const forgery = paidGet(server, forged);
+    const victim = await paidGet(server, victimHeader);
+    release({ isValid: true, payer: PAYER }); // only matters if the forgery got that far
+    const rejected = await forgery;
+
+    expect(rejected.statusCode).toBe(402);
+    expect(rejected.json()).toMatchObject({ error: 'invalid_exact_evm_payload_signature' });
+    expect(victim.statusCode).toBe(200); // not 429 concurrent_request
+    expect(facilitator.verify).toHaveBeenCalledTimes(1); // only the victim's, the forgery never left
+    expect(compose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not claim the nonce for a forgery, so a rejected header is rejected the same way again', async () => {
+    server = buildServer();
+    const forged = await forgedAs(fromOf(await pay({ payerPrivateKey: newKey() })));
+
+    const first = await paidGet(server, forged);
+    const second = await paidGet(server, forged);
+
+    expect(first.json()).toMatchObject({ error: 'invalid_exact_evm_payload_signature' });
+    expect(second.json()).toMatchObject({ error: 'invalid_exact_evm_payload_signature' }); // not payment_already_used
+    expect(facilitator.verify).not.toHaveBeenCalled();
+  });
+
+  it('rejects a payment whose signed fields were changed afterwards (amount raised)', async () => {
+    server = buildServer();
+    const tampered = mutateAuthorization(await pay(), (auth) => {
+      auth.value = '40000'; // still >= 30000, so only the signature can catch it
+    });
+
+    const res = await paidGet(server, tampered);
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).toMatchObject({ error: 'invalid_exact_evm_payload_signature' });
+    expect(facilitator.verify).not.toHaveBeenCalled();
+  });
+
+  it('rejects a 65-byte signature that is not a signature at all, with 402 and not a crash', async () => {
+    server = buildServer();
+    const junk = withSignature(await pay(), `0x${'11'.repeat(65)}`);
+
+    const res = await paidGet(server, junk);
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).toMatchObject({ error: 'invalid_exact_evm_payload_signature' });
+    expect(facilitator.verify).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['exactly as signed', (header: string) => header],
+    [
+      'with the payer address in another hex case',
+      (header: string) =>
+        mutateAuthorization(header, (auth) => {
+          auth.from = `0x${auth.from.slice(2).toLowerCase()}`;
+        }),
+    ],
+  ])('lets a payment signed by the payer it names through to the facilitator (%s)', async (_label, variant) => {
+    server = buildServer();
+    const header = variant(await pay({ payerPrivateKey: newKey() }));
+
+    const res = await paidGet(server, header);
+
+    expect(res.statusCode).toBe(200);
+    expect(facilitator.verify).toHaveBeenCalledTimes(1);
+    expect(facilitator.settle).toHaveBeenCalledTimes(1);
+  });
+
+  // 64 bytes (EIP-2098 compact), a contract wallet's ERC-1271 blob and an ERC-6492-wrapped one are all
+  // "not a plain 65-byte signature": they can't be checked here, so they are NOT rejected locally.
+  it.each([64, 100, 300])('does not reject locally a %i-byte signature: the facilitator decides', async (bytes) => {
+    server = buildServer();
+    const signature = `0x${'ab'.repeat(bytes)}`;
+    const header = withSignature(await pay({ payerPrivateKey: newKey() }), signature);
+
+    const res = await paidGet(server, header);
+
+    expect(res.statusCode).toBe(200); // the stubbed facilitator accepts it
+    expect(facilitator.verify).toHaveBeenCalledTimes(1);
+    expect(facilitator.verify.mock.calls[0]![0].payload.signature).toBe(signature);
   });
 });
 

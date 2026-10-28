@@ -1,14 +1,17 @@
 import { createFacilitatorConfig } from '@coinbase/x402';
 import { decodePayment } from 'x402/schemes';
-import { processPriceToAtomicAmount } from 'x402/shared';
+import { getNetworkId, processPriceToAtomicAmount } from 'x402/shared';
 import {
   SettleError,
   VerifyError,
+  evm,
   settleResponseHeader,
+  type ExactEvmPayload,
   type PaymentPayload,
   type PaymentRequirements,
 } from 'x402/types';
 import { useFacilitator } from 'x402/verify';
+import { getAddress, verifyTypedData, type Address, type Hex } from 'viem';
 import { env } from '../env.js';
 
 // The receiving side of x402. USDC lands in Jeff's Coinbase CDP server wallet, but this process
@@ -101,8 +104,8 @@ const reasonOf = (reason: unknown, fallback: string): string => (typeof reason =
 
 // The reference verifier does not check whether an authorization nonce was already used, so a
 // replayed header passes /verify, runs the vendors, and only then fails at /settle: free lookups.
-// This in-process ledger lets a payment through once. The claim is taken synchronously before the
-// first await, so concurrent requests with the same header can't both get in. It is released only
+// This in-process ledger lets a payment through once. Check-and-claim is synchronous (no await
+// between the two), so concurrent requests with the same header can't both get in. It is released only
 // if verification itself fails; once verified, the nonce stays claimed until the authorization
 // expires (validBefore), even if the request later fails: a spent payment is simply re-signed.
 // Single instance only; with several machines it needs a shared store.
@@ -129,6 +132,58 @@ function claimNonce(from: string, nonce: string, validBefore: number): (() => vo
 
 // Takes the payer's single in-flight slot (see x402Middleware), or returns null if it is taken.
 export type AdmitPayer = (from: string) => (() => void) | null;
+
+// An ordinary wallet's ECDSA signature: r (32 bytes) + s (32) + v (1).
+const ECDSA_SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
+
+// Whether `authorization.from` can be trusted as the payer's identity, checked here with no network
+// call (it is the same EIP-712 TransferWithAuthorization the facilitator verifies, rebuilt from what
+// the client sent and our own requirements). `from` is text anyone can write, and it keys the
+// per-payer in-flight cap, so it has to be authenticated before it can hold a slot: otherwise
+// requests naming a victim's (public, on-chain) address keep that victim's slot taken.
+//
+// False only for a plain 65-byte ECDSA signature that was not made by `from` (or is not a signature
+// at all). Any other length is a smart-contract wallet (ERC-1271, or ERC-6492 for a not yet deployed
+// one; 64-byte EIP-2098 compact signatures land here too). Those can only be checked with an on-chain
+// call, so they are passed on to the facilitator unchecked: in v1 a smart-wallet payer can still be
+// griefed by a forged `from`, and a smart wallet that happens to sign with exactly 65 bytes (a 1-of-1
+// Safe, say) is rejected here. Expected to be rare at launch.
+async function isSignedByNamedPayer(
+  payload: PaymentPayload,
+  evmPayload: ExactEvmPayload,
+  requirements: PaymentRequirements,
+): Promise<boolean> {
+  const { signature, authorization } = evmPayload;
+  if (!ECDSA_SIGNATURE.test(signature)) return true;
+  const { name, version } = requirements.extra as { name: string; version: string };
+  try {
+    // getAddress, like the client's signer: viem's EIP-712 encoder rejects a mixed-case address
+    // whose case is not its checksum, though the signature is the same for any case.
+    const from = getAddress(authorization.from);
+    return await verifyTypedData({
+      address: from,
+      domain: {
+        name,
+        version,
+        chainId: getNetworkId(payload.network),
+        verifyingContract: requirements.asset as Address,
+      },
+      types: evm.authorizationTypes,
+      primaryType: evm.authorizationPrimaryType,
+      message: {
+        from,
+        to: getAddress(authorization.to),
+        value: BigInt(authorization.value),
+        validAfter: BigInt(authorization.validAfter),
+        validBefore: BigInt(authorization.validBefore),
+        nonce: authorization.nonce as Hex,
+      },
+      signature: signature as Hex,
+    });
+  } catch {
+    return false; // 65 bytes that don't recover to any address
+  }
+}
 
 // `facilitatorError` marks a failure of the facilitator call itself (timeout, network, garbled
 // reply) as opposed to a verdict about the payment, so the middleware can log the two differently.
@@ -165,7 +220,11 @@ export async function verifyPayment(
   if (authorization.to.toLowerCase() !== requirements.payTo.toLowerCase()) {
     return { ok: false, reason: 'invalid_exact_evm_payload_recipient_mismatch' };
   }
-  if (!DIGITS.test(authorization.value) || !DIGITS.test(authorization.validBefore)) {
+  if (
+    !DIGITS.test(authorization.value) ||
+    !DIGITS.test(authorization.validBefore) ||
+    !DIGITS.test(authorization.validAfter)
+  ) {
     return { ok: false, reason: 'invalid_payment_header' };
   }
   if (BigInt(authorization.value) < BigInt(requirements.maxAmountRequired)) {
@@ -174,6 +233,12 @@ export async function verifyPayment(
   const validBefore = Number(authorization.validBefore);
   if (validBefore > Math.floor(Date.now() / 1000) + MAX_VALID_BEFORE_SECONDS) {
     return { ok: false, reason: 'invalid_payment_header' };
+  }
+
+  // Before the nonce claim and the slot: a forgery must not hold either (see isSignedByNamedPayer).
+  // Same reason the facilitator gives for the same failure.
+  if (!(await isSignedByNamedPayer(payload, payload.payload, requirements))) {
+    return { ok: false, reason: 'invalid_exact_evm_payload_signature' };
   }
 
   const release = claimNonce(authorization.from, authorization.nonce, validBefore);
