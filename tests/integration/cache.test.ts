@@ -80,6 +80,7 @@ describe('per-field TTL', () => {
     ['business', '6 days 23 hours', '7 days 1 hour'],
     ['reputation', '23 hours', '25 hours'],
     ['hours', '59 minutes', '61 minutes'],
+    ['enrichment', '6 days 23 hours', '7 days 1 hour'],
   ] as const)('%s: served at %s, null at %s', async (field, fresh, stale) => {
     await setCached(P1, field, { v: 1 });
     await backdate(P1, field, fresh);
@@ -120,8 +121,8 @@ describe('invalidate', () => {
     expect(await getCached(P3, 'business')).toEqual({ name: 'Joe' });
   });
 
-  it('clears all four fields when no field is given, and keeps the row', async () => {
-    const fields: CacheField[] = ['carrier', 'business', 'reputation', 'hours'];
+  it('clears all five fields when no field is given, and keeps the row', async () => {
+    const fields: CacheField[] = ['carrier', 'business', 'reputation', 'hours', 'enrichment'];
     for (const field of fields) await setCached(P3, field, { v: field });
     await invalidate(P3);
     for (const field of fields) expect(await getCached(P3, field)).toBeNull();
@@ -129,6 +130,7 @@ describe('invalidate', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].carrier_cached_at).toBeNull();
     expect(rows[0].hours_data).toBeNull();
+    expect(rows[0].enrichment_cached_at).toBeNull();
   });
 
   it('is a no-op for a phone with no row', async () => {

@@ -1,7 +1,7 @@
 import postgres from 'postgres';
 import { env } from '../env.js';
 
-export type CacheField = 'carrier' | 'business' | 'reputation' | 'hours';
+export type CacheField = 'carrier' | 'business' | 'reputation' | 'hours' | 'enrichment';
 
 const HOUR = 3600;
 const TTL_SECONDS: Record<CacheField, number> = {
@@ -9,6 +9,7 @@ const TTL_SECONDS: Record<CacheField, number> = {
   business: 7 * 24 * HOUR,
   reputation: 24 * HOUR,
   hours: HOUR,
+  enrichment: 7 * 24 * HOUR,
 };
 
 // Module-level singleton, created on first use. postgres.js connects lazily.
@@ -57,7 +58,7 @@ export async function setCached<T>(phone: string, field: CacheField, value: T): 
   `;
 }
 
-// Clears one field, or all four when none is given. The row itself is kept.
+// Clears one field, or all five when none is given. The row itself is kept.
 export async function invalidate(phone: string, field?: CacheField): Promise<void> {
   const sql = db();
   if (field === undefined) {
@@ -66,7 +67,8 @@ export async function invalidate(phone: string, field?: CacheField): Promise<voi
       SET carrier_data = NULL, carrier_cached_at = NULL,
           business_data = NULL, business_cached_at = NULL,
           reputation_data = NULL, reputation_cached_at = NULL,
-          hours_data = NULL, hours_cached_at = NULL
+          hours_data = NULL, hours_cached_at = NULL,
+          enrichment_data = NULL, enrichment_cached_at = NULL
       WHERE phone_e164 = ${phone}
     `;
     return;
