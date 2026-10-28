@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { redact, safeErrorMessage } from '../../src/lib/logSafe.js';
 
 // Vendor and database error text is attacker-adjacent and vendor-controlled: it can quote the URL
@@ -42,6 +42,22 @@ describe('redact', () => {
     const key = process.env.LOG_PHONE_HMAC_KEY!;
     expect(key).toBeTruthy(); // the test fixture from vitest.config.ts
     expect(redact(`oops ${key} oops`)).toBe('oops [redacted] oops');
+  });
+
+  // The ScraperAPI key travels in the query string of every proxied Yelp request, so any error that
+  // quotes that URL quotes the key. (src/env.ts reads process.env once, hence the fresh import.)
+  it('removes the configured SCRAPERAPI_KEY, raw and URL-encoded, if an error quotes the proxied URL', async () => {
+    vi.resetModules();
+    vi.stubEnv('SCRAPERAPI_KEY', 'sa/key+0123456789abcdef');
+    try {
+      const { redact: fresh } = await import('../../src/lib/logSafe.js');
+      const url = `https://api.scraperapi.com/?api_key=${encodeURIComponent('sa/key+0123456789abcdef')}&keep_headers=true`;
+
+      expect(fresh(`request to ${url} failed`)).toBe('request to https://api.scraperapi.com/?api_key=[redacted]&keep_headers=true failed');
+      expect(fresh('raw sa/key+0123456789abcdef raw')).toBe('raw [redacted] raw');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('keeps the parts of an error that make it diagnosable', () => {

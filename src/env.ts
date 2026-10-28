@@ -6,6 +6,9 @@ export interface Env {
   readonly TWILIO_SID: string | undefined;
   readonly TWILIO_TOKEN: string | undefined;
   readonly YELP_API_KEY: string | undefined;
+  // Optional. Set: Yelp calls go through ScraperAPI (Yelp refuses datacenter IPs such as Fly's).
+  // Unset: Yelp is called directly, which is right wherever Yelp does not block the machine.
+  readonly SCRAPERAPI_KEY: string | undefined;
   readonly GOOGLE_PLACES_API_KEY: string | undefined;
   readonly IPQS_API_KEY: string | undefined;
   readonly CDP_API_KEY: string | undefined;
@@ -35,6 +38,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Readonly<Env> 
     TWILIO_SID: source.TWILIO_SID || undefined,
     TWILIO_TOKEN: source.TWILIO_TOKEN || undefined,
     YELP_API_KEY: source.YELP_API_KEY || undefined,
+    SCRAPERAPI_KEY: source.SCRAPERAPI_KEY || undefined,
     GOOGLE_PLACES_API_KEY: source.GOOGLE_PLACES_API_KEY || undefined,
     IPQS_API_KEY: source.IPQS_API_KEY || undefined,
     CDP_API_KEY: source.CDP_API_KEY || undefined,

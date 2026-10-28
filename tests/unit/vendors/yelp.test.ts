@@ -54,6 +54,9 @@ beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal('fetch', fetchMock);
   mockEnv.YELP_API_KEY = 'test-yelp-key';
+  // Unset unless a test sets it: with a ScraperAPI key Yelp is called through the proxy, and a key
+  // exported in the developer's shell must not flip the direct-call tests onto that path.
+  mockEnv.SCRAPERAPI_KEY = undefined;
 });
 afterEach(async () => {
   vi.unstubAllGlobals();
@@ -228,6 +231,212 @@ describe('lookupYelp failure handling', () => {
 
   it('throws a clear error, without calling Yelp, when YELP_API_KEY is unset', async () => {
     mockEnv.YELP_API_KEY = undefined;
+    await expect(lookupYelp(PHONE)).rejects.toThrow('YELP_API_KEY');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// Yelp refuses datacenter IPs (Fly's included), so with SCRAPERAPI_KEY set the same Yelp GET goes
+// through ScraperAPI (https://docs.scraperapi.com): GET https://api.scraperapi.com/?api_key=..&url=..
+// &keep_headers=true, where keep_headers makes it forward our Authorization header to Yelp. The status
+// code of the response is ScraperAPI's, not Yelp's: 200 and 404 are the target's; 401 is a bad
+// ScraperAPI key; 403 is the monthly credits used up; 429 too many concurrent requests; 500 the
+// request failed after ScraperAPI's own retries.
+describe('lookupYelp through ScraperAPI', () => {
+  const SCRAPER_KEY = 'scraper key/+&=?'; // awkward on purpose: it has to be URL-encoded
+  const YELP_URL = 'https://api.yelp.com/v3/businesses/search/phone?phone=%2B12125553333';
+
+  beforeEach(() => {
+    mockEnv.SCRAPERAPI_KEY = SCRAPER_KEY;
+  });
+
+  // The upstream body echoes both credentials, as a misbehaving gateway might.
+  const echoingBody = () => `Bad request ${SCRAPER_KEY} ${mockEnv.YELP_API_KEY}`;
+  const expectNoKeyLeak = (error: unknown) => {
+    const dump = inspect(error, { depth: null, showHidden: true });
+    for (const secret of [SCRAPER_KEY, encodeURIComponent(SCRAPER_KEY), mockEnv.YELP_API_KEY!]) {
+      expect(dump).not.toContain(secret);
+    }
+    expect((error as Error).cause).toBeUndefined();
+  };
+
+  describe('the request', () => {
+    it('is a GET to api.scraperapi.com with the key, the encoded Yelp URL and keep_headers=true', async () => {
+      mockYelp({ businesses: [] });
+      await lookupYelp(PHONE);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [raw, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const url = new URL(String(raw));
+      expect(url.origin).toBe('https://api.scraperapi.com');
+      expect(url.searchParams.get('api_key')).toBe(SCRAPER_KEY); // survived & + = ? in the key
+      expect(url.searchParams.get('url')).toBe(YELP_URL); // the Yelp URL, intact, including its own query
+      expect(url.searchParams.get('keep_headers')).toBe('true');
+      expect([...url.searchParams.keys()].sort()).toEqual(['api_key', 'keep_headers', 'url']);
+      expect(init.method ?? 'GET').toBe('GET');
+    });
+
+    it('is built with every value percent-encoded, not just parsed leniently', async () => {
+      mockYelp({ businesses: [] });
+      await lookupYelp(PHONE);
+
+      const raw = String((fetchMock.mock.calls[0] as [string])[0]);
+      expect(raw).toBe(
+        `https://api.scraperapi.com/?api_key=${encodeURIComponent(SCRAPER_KEY)}` +
+          `&url=${encodeURIComponent(YELP_URL)}&keep_headers=true`,
+      );
+    });
+
+    it('still sends our Yelp Authorization header, which keep_headers makes ScraperAPI forward', async () => {
+      mockYelp({ businesses: [] });
+      await lookupYelp(PHONE);
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.headers).toMatchObject({ Authorization: 'Bearer test-yelp-key' });
+    });
+
+    it('does not call Yelp directly', async () => {
+      mockYelp({ businesses: [] });
+      await lookupYelp(PHONE);
+
+      for (const [url] of fetchMock.mock.calls as [string][]) expect(String(url)).not.toMatch(/^https:\/\/api\.yelp\.com/);
+    });
+
+    it('calls Yelp directly when SCRAPERAPI_KEY is unset', async () => {
+      mockEnv.SCRAPERAPI_KEY = undefined;
+      mockYelp({ businesses: [] });
+      await lookupYelp(PHONE);
+
+      expect(String((fetchMock.mock.calls[0] as [string])[0])).toBe(YELP_URL);
+    });
+  });
+
+  describe('a successful lookup', () => {
+    it('maps and caches the business exactly like a direct call', async () => {
+      mockYelp({ businesses: [JOES] });
+
+      expect(await lookupYelp(PHONE)).toEqual({ business: JOES_MAPPED, cached: false });
+      expect(await getCached(PHONE, 'business')).toEqual(JOES_MAPPED);
+    });
+
+    it('is then served from the cache without spending another ScraperAPI credit', async () => {
+      mockYelp({ businesses: [JOES] });
+      await lookupYelp(PHONE);
+
+      expect(await lookupYelp(PHONE)).toEqual({ business: JOES_MAPPED, cached: true });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches a confirmed miss', async () => {
+      mockYelp({ businesses: [] });
+      await lookupYelp(PHONE);
+
+      expect(await getCached(PHONE, 'business')).toEqual({ matched: false });
+    });
+  });
+
+  describe('when ScraperAPI itself rejects us', () => {
+    it.each([
+      ['401, a bad ScraperAPI key', 401, /ScraperAPI auth failed \(HTTP 401\)/],
+      ['403, the monthly credits used up', 403, /ScraperAPI auth failed \(HTTP 403\)/],
+    ])('throws loudly on %s, with its own message and not as a Yelp failure', async (_label, status, pattern) => {
+      fetchMock.mockImplementation(async () => new Response(echoingBody(), { status }));
+      const error = await lookupYelp(PHONE).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(pattern);
+      expect((error as Error).message).not.toMatch(/yelp/i);
+      expectNoKeyLeak(error);
+      expect(await getCached(PHONE, 'business')).toBeNull();
+    });
+  });
+
+  describe('when the proxied response carries a Yelp authentication failure', () => {
+    // ScraperAPI's status is not Yelp's, so Yelp's own verdict is read from its error body.
+    it.each([
+      ['a 200', 200],
+      ['a 400', 400],
+    ])('throws loudly, as for a direct call, on %s whose body is Yelp\'s TOKEN_INVALID', async (_label, status) => {
+      yelpReturns({ error: { code: 'TOKEN_INVALID', description: `Bad key ${mockEnv.YELP_API_KEY}` } }, status);
+      const error = await lookupYelp(PHONE).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(Error);
+      // A Yelp failure (the message says it was seen via the proxy), not a ScraperAPI one.
+      expect((error as Error).message).toMatch(/^Yelp authentication failed/);
+      expect((error as Error).message).not.toMatch(/^ScraperAPI/);
+      expectNoKeyLeak(error);
+      expect(await getCached(PHONE, 'business')).toBeNull();
+    });
+
+    it('does not mistake other Yelp errors for an auth failure', async () => {
+      yelpReturns({ error: { code: 'VALIDATION_ERROR', description: 'phone is invalid' } }, 400);
+
+      expect(await lookupYelp(PHONE)).toEqual(DEGRADED);
+    });
+  });
+
+  describe('when the proxy cannot deliver an answer', () => {
+    it.each([
+      ['a 429 (too many concurrent requests)', 429],
+      ['a 500 (failed after ScraperAPI\'s retries)', 500],
+      ['a 404', 404],
+      ['a 400', 400],
+    ])('degrades and does not cache on %s, with a plain-text body', async (_label, status) => {
+      fetchMock.mockImplementation(async () => new Response('Request failed. You will not be charged.', { status }));
+
+      expect(await lookupYelp(PHONE)).toEqual(DEGRADED);
+      expect(await getCached(PHONE, 'business')).toBeNull();
+    });
+
+    it('degrades on a network error', async () => {
+      fetchMock.mockRejectedValue(new TypeError('fetch failed'));
+
+      expect(await lookupYelp(PHONE)).toEqual(DEGRADED);
+    });
+
+    it('treats a 200 that is not Yelp JSON (a captcha page, say) as a vendor gap: degraded, not cached', async () => {
+      fetchMock.mockImplementation(async () => new Response('<html>captcha</html>', { status: 200 }));
+
+      expect(await lookupYelp(PHONE)).toEqual(DEGRADED);
+      expect(await getCached(PHONE, 'business')).toBeNull();
+    });
+  });
+
+  // ScraperAPI's median is about 2 s, well over the 900 ms a direct Yelp call gets.
+  describe('the time limit', () => {
+    const hangUntilAborted = () =>
+      fetchMock.mockImplementation(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')));
+          }),
+      );
+
+    it('is 2.5 s, not 900 ms, and a timeout degrades without caching', async () => {
+      hangUntilAborted();
+      const started = Date.now();
+      const result = await lookupYelp(PHONE);
+      const elapsed = Date.now() - started;
+
+      expect(result).toEqual(DEGRADED);
+      expect(elapsed).toBeGreaterThanOrEqual(2450);
+      expect(elapsed).toBeLessThan(3200);
+      expect(await getCached(PHONE, 'business')).toBeNull();
+    });
+
+    it('lets a response that takes 1.5 s (too slow for a direct call) through', async () => {
+      fetchMock.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        return new Response(JSON.stringify({ businesses: [JOES] }), { status: 200 });
+      });
+
+      expect(await lookupYelp(PHONE)).toEqual({ business: JOES_MAPPED, cached: false });
+    });
+  });
+
+  it('still throws a clear error, without calling anything, when YELP_API_KEY is unset', async () => {
+    mockEnv.YELP_API_KEY = undefined;
+
     await expect(lookupYelp(PHONE)).rejects.toThrow('YELP_API_KEY');
     expect(fetchMock).not.toHaveBeenCalled();
   });

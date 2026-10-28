@@ -10,6 +10,8 @@ import type { BusinessMatch, Dossier, NumberClassification } from './types.js';
 //    its promise fulfils and its section is simply neutral. compose has no timeout of its own; the
 //    2 s budget holds because every adapter bounds itself at 900 ms. Worst case is Yelp (900 ms)
 //    then Google (900 ms) = 1800 ms, with Twilio and IPQS overlapped inside the Yelp wait.
+//    Except while Yelp goes through ScraperAPI (SCRAPERAPI_KEY set): its limit is then 2500 ms, so
+//    the worst case for a number with a business is 2500 + 900 = 3400 ms, over the 2 s budget.
 //  - Operational error (bad credentials, missing config): the adapter THROWS. A silent default
 //    would hide a dead key behind "no data" on every call, so compose throws too and the route
 //    decides what to return.

@@ -17,6 +17,7 @@ function configuredSecrets(): string[] {
   return [
     env.TWILIO_TOKEN,
     env.YELP_API_KEY,
+    env.SCRAPERAPI_KEY,
     env.GOOGLE_PLACES_API_KEY,
     env.IPQS_API_KEY,
     env.CDP_API_KEY,
