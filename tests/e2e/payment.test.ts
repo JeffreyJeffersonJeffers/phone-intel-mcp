@@ -587,6 +587,51 @@ describe('per-payer in-flight cap', () => {
       vi.useRealTimers();
     }
   });
+
+  // The window the whole cap exists for: between the vendors answering and the money moving. A
+  // payer whose first authorization is still settling has not been drained yet, so a second one
+  // admitted now would verify against the full balance and run the vendors for free.
+  it('holds the slot through settlement: a second request mid-settle gets 429', async () => {
+    server = buildServer();
+    const [first, second] = await payFrom(newKey(), 2);
+    const settle = deferred<unknown>();
+    facilitator.settle.mockImplementationOnce(() => settle.promise);
+
+    const inFlight = paidGet(server, first!);
+    await vi.waitFor(() => expect(facilitator.settle).toHaveBeenCalledTimes(1)); // vendors done, settling
+    const mid = await paidGet(server, second!);
+    settle.resolve({ success: true, transaction: TX, network: 'base-sepolia', payer: PAYER });
+    await inFlight;
+
+    expect(mid.statusCode).toBe(429);
+    expect(mid.json().error.code).toBe('concurrent_request');
+  });
+
+  // A request that outlives its slot (expired and re-issued) must not, when it finally ends, free
+  // the slot of the request that took over, or the cap would be open again for that payer.
+  it('a late release from an expired holder does not free the new holder', async () => {
+    server = buildServer();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const [a, b, c] = await payFrom(newKey(), 3);
+      const lookupA = deferred<Dossier>();
+      const lookupB = deferred<Dossier>();
+      compose.mockImplementationOnce(() => lookupA.promise).mockImplementationOnce(() => lookupB.promise);
+      const reqA = paidGet(server, a!);
+      await composeEntered(1);
+      vi.setSystemTime(Date.now() + 61_000);
+      const reqB = paidGet(server, b!); // takes over the expired slot
+      await composeEntered(2);
+      lookupA.resolve(DOSSIER); // A finishes late: its release must be a no-op
+      await reqA;
+      const resC = await paidGet(server, c!); // B still in flight => must be 429
+      lookupB.resolve(DOSSIER);
+      await reqB;
+      expect(resC.statusCode).toBe(429);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('payment logging', () => {
