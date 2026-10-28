@@ -22,6 +22,13 @@ export type UsdcAmount = '0.03';
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const MAX_TIMEOUT_SECONDS = 60;
+// The reference verifier only requires validBefore >= now + 6 s, with no upper bound. Without a cap
+// a payer could pin ledger entries (and so server memory) for decades, and a restart would leave
+// every old nonce replayable. We advertise 60 s; the extra 10 s is clock-skew room.
+const MAX_VALID_BEFORE_SECONDS = MAX_TIMEOUT_SECONDS + 10;
+// The facilitator package's zod schema accepts "1e5", "1.0" and "" as integers. Strict digits only,
+// so BigInt() below can't throw on payer-controlled input.
+const DIGITS = /^\d+$/;
 const VERIFY_TIMEOUT_MS = 5_000;
 const SETTLE_TIMEOUT_MS = 15_000;
 
@@ -80,6 +87,8 @@ export function buildRequirements(amount: UsdcAmount, network: PaymentNetwork, r
   };
 }
 
+// Note: this stops waiting, it does not cancel the facilitator's fetch (useFacilitator takes no
+// AbortSignal). A timed-out call can still complete on the facilitator's side.
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -97,21 +106,32 @@ const reasonOf = (reason: unknown, fallback: string): string => (typeof reason =
 // if verification itself fails; once verified, the nonce stays claimed until the authorization
 // expires (validBefore), even if the request later fails: a spent payment is simply re-signed.
 // Single instance only; with several machines it needs a shared store.
+// Entries live at most MAX_VALID_BEFORE_SECONDS (validBefore is capped), so a restart leaves a
+// replay window of at most that long too.
 const claimedNonces = new Map<string, number>();
+let lastSweep = 0;
 
 // Returns a release function, or null if this payment was already claimed.
 function claimNonce(from: string, nonce: string, validBefore: number): (() => void) | null {
   const now = Math.floor(Date.now() / 1000);
-  for (const [key, expiry] of claimedNonces) if (expiry < now) claimedNonces.delete(key);
-  const key = `${from.toLowerCase()}:${nonce}`;
+  // At most one sweep a second, so request cost doesn't grow with the size of the ledger.
+  if (now !== lastSweep) {
+    lastSweep = now;
+    for (const [key, expiry] of claimedNonces) if (expiry < now) claimedNonces.delete(key);
+  }
+  // Both lowercased: the nonce regex accepts mixed-case hex, and the signature verifies over the
+  // bytes, so 0xABCD... and 0xabcd... are the same authorization.
+  const key = `${from.toLowerCase()}:${nonce.toLowerCase()}`;
   if (claimedNonces.has(key)) return null;
   claimedNonces.set(key, validBefore);
   return () => void claimedNonces.delete(key);
 }
 
+// `facilitatorError` marks a failure of the facilitator call itself (timeout, network, garbled
+// reply) as opposed to a verdict about the payment, so the middleware can log the two differently.
 export type VerifyResult =
   | { ok: true; payload: PaymentPayload; requirements: PaymentRequirements }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; facilitatorError?: true };
 
 // `resource` goes to the facilitator, a third party. Pass the route pattern, never the request
 // URL: for /lookup/:phone the URL is the phone number.
@@ -138,11 +158,18 @@ export async function verifyPayment(
   if (authorization.to.toLowerCase() !== requirements.payTo.toLowerCase()) {
     return { ok: false, reason: 'invalid_exact_evm_payload_recipient_mismatch' };
   }
+  if (!DIGITS.test(authorization.value) || !DIGITS.test(authorization.validBefore)) {
+    return { ok: false, reason: 'invalid_payment_header' };
+  }
   if (BigInt(authorization.value) < BigInt(requirements.maxAmountRequired)) {
     return { ok: false, reason: 'invalid_exact_evm_payload_authorization_value' };
   }
+  const validBefore = Number(authorization.validBefore);
+  if (validBefore > Math.floor(Date.now() / 1000) + MAX_VALID_BEFORE_SECONDS) {
+    return { ok: false, reason: 'invalid_payment_header' };
+  }
 
-  const release = claimNonce(authorization.from, authorization.nonce, Number(authorization.validBefore));
+  const release = claimNonce(authorization.from, authorization.nonce, validBefore);
   if (!release) return { ok: false, reason: 'payment_already_used' };
 
   try {
@@ -154,15 +181,13 @@ export async function verifyPayment(
   } catch (err) {
     release();
     // Never log err: it can carry the payer address and the facilitator's response.
-    return {
-      ok: false,
-      reason: reasonOf(err instanceof VerifyError ? err.invalidReason : undefined, 'verification_failed'),
-    };
+    if (err instanceof VerifyError) return { ok: false, reason: reasonOf(err.invalidReason, 'verification_failed') };
+    return { ok: false, reason: 'verification_failed', facilitatorError: true };
   }
   return { ok: true, payload, requirements };
 }
 
-export type SettleResult = { ok: true; header: string } | { ok: false; reason: string };
+export type SettleResult = { ok: true; header: string } | { ok: false; reason: string; facilitatorError?: true };
 
 // Moves the USDC. `header` is the value for the X-PAYMENT-RESPONSE response header.
 export async function settlePayment(
@@ -175,6 +200,7 @@ export async function settlePayment(
     if (!settlement.success) return { ok: false, reason: reasonOf(settlement.errorReason, 'settlement_failed') };
     return { ok: true, header: settleResponseHeader(settlement) };
   } catch (err) {
-    return { ok: false, reason: reasonOf(err instanceof SettleError ? err.errorReason : undefined, 'settlement_failed') };
+    if (err instanceof SettleError) return { ok: false, reason: reasonOf(err.errorReason, 'settlement_failed') };
+    return { ok: false, reason: 'settlement_failed', facilitatorError: true };
   }
 }

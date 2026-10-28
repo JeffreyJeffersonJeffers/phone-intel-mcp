@@ -1,10 +1,11 @@
 import { Writable } from 'node:stream';
+import { VerifyError } from 'x402/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { composeDossier } from '../../src/dossier/compose.js';
 import type { Dossier } from '../../src/dossier/types.js';
 import { env } from '../../src/env.js';
 import { buildServer } from '../../src/server.js';
-import { buildTestPayment, toAtomicUsdc, usdcAddress } from './buildTestPayment.js';
+import { buildTestPayment, mutateAuthorization, toAtomicUsdc, usdcAddress } from './buildTestPayment.js';
 
 // The facilitator (Coinbase's reference verifier/settler) is the only network dependency of the
 // payment path, so stubbing it keeps these tests deterministic and free. The real thing is
@@ -293,6 +294,53 @@ describe('rejected payments', () => {
     expect(facilitator.verify).not.toHaveBeenCalled();
     expect(compose).not.toHaveBeenCalled();
   });
+
+  // The reference verifier accepts any validBefore >= now + 6 s. Uncapped, a payer could pin a
+  // replay-ledger entry (server memory) for years.
+  it('rejects an authorization whose validBefore is far in the future', async () => {
+    server = buildServer();
+    const inOneHour = String(Math.floor(Date.now() / 1000) + 3600);
+    const header = mutateAuthorization(await pay(), (auth) => {
+      auth.validBefore = inOneHour;
+    });
+
+    const res = await paidGet(server, header);
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).toMatchObject({ error: 'invalid_payment_header' });
+    expect(facilitator.verify).not.toHaveBeenCalled();
+    expect(compose).not.toHaveBeenCalled();
+  });
+
+  // The facilitator package's schema accepts all of these as "integers"; BigInt() throws on most of
+  // them, which used to surface as a 500 echoing the payer's value.
+  it.each(['1e5', '1.0', '', '0x7530'])('rejects a non-decimal authorization value %j with 402, not 500', async (value) => {
+    server = buildServer();
+    const header = mutateAuthorization(await pay(), (auth) => {
+      auth.value = value;
+    });
+
+    const res = await paidGet(server, header);
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).toMatchObject({ error: 'invalid_payment_header' });
+    expect(res.body).not.toMatch(/BigInt/i);
+    expect(facilitator.verify).not.toHaveBeenCalled();
+    expect(compose).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-decimal validBefore with 402', async () => {
+    server = buildServer();
+    const header = mutateAuthorization(await pay(), (auth) => {
+      auth.validBefore = '1e12';
+    });
+
+    const res = await paidGet(server, header);
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).toMatchObject({ error: 'invalid_payment_header' });
+    expect(facilitator.verify).not.toHaveBeenCalled();
+  });
 });
 
 // The reference verifier does not check whether the authorization nonce was already used, so a
@@ -308,6 +356,26 @@ describe('payment replay', () => {
     expect(first.statusCode).toBe(200);
     expect(second.statusCode).toBe(402);
     expect(second.json()).toMatchObject({ error: 'payment_already_used' });
+    expect(compose).toHaveBeenCalledTimes(1);
+    expect(facilitator.settle).toHaveBeenCalledTimes(1);
+  });
+
+  // The nonce regex accepts mixed-case hex and the signature verifies over the bytes, so a payer can
+  // re-case the nonce of an already-used payment and it is still a valid signature.
+  it('rejects a replay even when the nonce hex case is changed', async () => {
+    server = buildServer();
+    const header = await pay();
+    const flipped = mutateAuthorization(header, (auth) => {
+      auth.nonce = `0x${auth.nonce.slice(2).toUpperCase()}`;
+    });
+    expect(flipped).not.toBe(header);
+
+    const first = await paidGet(server, header);
+    const second = await paidGet(server, flipped);
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(402);
+    expect(second.json().error).toMatch(/already_used|replay/i);
     expect(compose).toHaveBeenCalledTimes(1);
     expect(facilitator.settle).toHaveBeenCalledTimes(1);
   });
@@ -346,5 +414,62 @@ describe('payment logging', () => {
     expect(text).not.toContain('%2B1');
     expect(text).not.toContain(header);
     expect(text.toLowerCase()).not.toContain('x-payment');
+  });
+
+  // A bad payment is routine; a broken facilitator is an incident (e.g. mainnet protocol mismatch).
+  // Both answer the client with 402, so the log is the only place the difference shows.
+  describe('separates a facilitator verdict from a facilitator failure', () => {
+    const payments = (logs: ReturnType<typeof captureLogs>) =>
+      logs.lines().flatMap((line) => (typeof line.payment === 'string' ? [{ payment: line.payment, level: line.level }] : []));
+
+    it('logs a verification network failure as facilitator_error at error level, without the error', async () => {
+      const logs = captureLogs();
+      server = buildServer({ logStream: logs.stream });
+      facilitator.verify.mockRejectedValue(new Error('socket hang up for 0x2222222222222222222222222222222222222222'));
+
+      await paidGet(server, await pay());
+
+      expect(payments(logs)).toEqual([{ payment: 'facilitator_error', level: 50 }]);
+      expect(logs.text()).not.toContain('socket hang up');
+      expect(logs.text()).not.toContain(PAYER);
+    });
+
+    it('logs a verdict delivered as a facilitator error response (VerifyError) as rejected', async () => {
+      const logs = captureLogs();
+      server = buildServer({ logStream: logs.stream });
+      facilitator.verify.mockRejectedValue(new VerifyError(400, { isValid: false, invalidReason: 'insufficient_funds' }));
+
+      const res = await paidGet(server, await pay());
+
+      expect(res.json()).toMatchObject({ error: 'insufficient_funds' });
+      expect(payments(logs)).toEqual([{ payment: 'rejected', level: 30 }]);
+    });
+
+    it('logs a settlement network failure as facilitator_error at error level', async () => {
+      const logs = captureLogs();
+      server = buildServer({ logStream: logs.stream });
+      facilitator.settle.mockRejectedValue(new Error('ETIMEDOUT'));
+
+      await paidGet(server, await pay());
+
+      expect(payments(logs)).toEqual([
+        { payment: 'verified', level: 30 },
+        { payment: 'facilitator_error', level: 50 },
+      ]);
+      expect(logs.text()).not.toContain('ETIMEDOUT');
+    });
+
+    it('logs a settlement the facilitator refused as settlement_failed', async () => {
+      const logs = captureLogs();
+      server = buildServer({ logStream: logs.stream });
+      facilitator.settle.mockResolvedValue({ success: false, errorReason: 'insufficient_funds', transaction: '', network: 'base-sepolia' });
+
+      await paidGet(server, await pay());
+
+      expect(payments(logs)).toEqual([
+        { payment: 'verified', level: 30 },
+        { payment: 'settlement_failed', level: 40 },
+      ]);
+    });
   });
 });

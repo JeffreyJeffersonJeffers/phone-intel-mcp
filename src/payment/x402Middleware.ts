@@ -60,7 +60,10 @@ export function requirePayment(amountUsdc: UsdcAmount, network: PaymentNetwork):
 
     const result = await verifyPayment(header, amountUsdc, network, facilitatorResource);
     if (!result.ok) {
-      request.log.info({ payment: 'rejected' }, 'payment rejected');
+      // A bad payment and a broken facilitator look the same to the client (402) but not to us:
+      // the second one needs someone to look at it. Status only, never the error itself.
+      if (result.facilitatorError) request.log.error({ payment: 'facilitator_error' }, 'facilitator error');
+      else request.log.info({ payment: 'rejected' }, 'payment rejected');
       return paymentRequired(reply, result.reason, requirements);
     }
     verified.set(request, { payload: result.payload, requirements: result.requirements, network });
@@ -80,7 +83,8 @@ export const settleOnSuccess: onSendAsyncHookHandler = async (request, reply, pa
 
   const settlement = await settlePayment(payment.payload, payment.requirements, payment.network);
   if (!settlement.ok) {
-    request.log.warn({ payment: 'settlement_failed' }, 'payment settlement failed');
+    if (settlement.facilitatorError) request.log.error({ payment: 'facilitator_error' }, 'facilitator error');
+    else request.log.warn({ payment: 'settlement_failed' }, 'payment settlement failed');
     // Replace the dossier with the 402. The body is serialized by hand: onSend runs after Fastify's
     // own serialization, so it takes the final payload string.
     const { body, header } = challenge(settlement.reason, payment.requirements);

@@ -16,6 +16,15 @@ export const usdcAddress = (network: TestNetwork) => USDC[network].address;
 // "0.03" -> "30000" (USDC has 6 decimals)
 export const toAtomicUsdc = (amount: string) => String(Math.round(Number(amount) * 1e6));
 
+// Rewrites fields of the authorization inside an X-PAYMENT header. The signature is NOT redone, so
+// the result is only good for checks that run before the facilitator, or for edits that keep the
+// signed bytes the same (e.g. the case of the nonce's hex digits).
+export function mutateAuthorization(header: string, mutate: (authorization: Record<string, string>) => void): string {
+  const payment = JSON.parse(Buffer.from(header, 'base64').toString());
+  mutate(payment.payload.authorization);
+  return Buffer.from(JSON.stringify(payment)).toString('base64');
+}
+
 export interface TestPaymentOptions {
   amount: string;
   network: TestNetwork;
