@@ -16,4 +16,10 @@ describe('normalizePhone', () => {
     expect(normalizePhone('../../etc/passwd')).toEqual({ error: 'invalid_phone' });
     expect(normalizePhone('1'.repeat(200))).toEqual({ error: 'invalid_phone' });
   });
+  it('rejects a 7-digit NANP local-only number', () => {
+    expect(normalizePhone('5551234')).toEqual({ error: 'invalid_phone' });
+  });
+  it('rejects numbers with fewer than 10 national digits even if libphonenumber calls them possible', () => {
+    expect(normalizePhone('555-123')).toEqual({ error: 'invalid_phone' });
+  });
 });

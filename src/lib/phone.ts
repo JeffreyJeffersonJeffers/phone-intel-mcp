@@ -20,6 +20,7 @@ export function normalizePhone(raw: string): { e164: string } | { error: 'invali
 
   if (parsed.getCountryCodeOrDefault() !== 1) return { error: 'not_us_number' };
   if (!phoneUtil.isPossibleNumber(parsed)) return { error: 'invalid_phone' };
+  if (String(parsed.getNationalNumberOrDefault()).length !== 10) return { error: 'invalid_phone' };
 
   return { e164: phoneUtil.format(parsed, PhoneNumberFormat.E164) };
 }
