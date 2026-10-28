@@ -10,6 +10,13 @@ import { buildServer } from '../../src/server.js';
 vi.mock('../../src/dossier/compose.js', () => ({ composeDossier: vi.fn() }));
 const compose = vi.mocked(composeDossier);
 
+// These tests are about the route's own behavior, so the x402 gate is replaced with a no-op.
+// The gate itself, HEAD included, is tested in tests/e2e/payment.test.ts.
+vi.mock('../../src/payment/x402Middleware.js', () => ({
+  requirePayment: () => async () => {},
+  settleOnSuccess: async (_request: unknown, _reply: unknown, payload: unknown) => payload,
+}));
+
 const PHONE = '+15165551234';
 
 const DOSSIER: Dossier = {

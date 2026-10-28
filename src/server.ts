@@ -9,6 +9,9 @@ import Fastify, {
 import { env } from './env.js';
 import { healthRoute } from './http/healthRoute.js';
 import { lookupRoute, REJECTION_MESSAGES } from './http/lookupRoute.js';
+import { requirePayment, settleOnSuccess } from './payment/x402Middleware.js';
+
+const PRICE_USDC = '0.03';
 
 export interface ServerOptions {
   // Send server logs here (at info level) instead of stdout, so tests can inspect them.
@@ -52,7 +55,18 @@ export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance 
       return reply.code(400).send({ error: { code: 'invalid_phone', message: REJECTION_MESSAGES.invalid_phone } });
     },
   });
+  // Built here, not inside the plugin below, so a missing WALLET_ADDRESS (or mainnet CDP key)
+  // throws from buildServer() at startup instead of surfacing later during plugin loading.
+  const requireUsdc = requirePayment(PRICE_USDC, env.NODE_ENV === 'production' ? 'base' : 'base-sepolia');
+
   server.register(healthRoute);
-  server.register(lookupRoute);
+  // Hooks added in this encapsulated context cover every route registered in it, including the
+  // HEAD route Fastify auto-creates for GET /lookup/:phone, so HEAD can't run vendors unpaid.
+  // /health is registered outside it and stays free.
+  server.register(async (paid) => {
+    paid.addHook('preHandler', requireUsdc);
+    paid.addHook('onSend', settleOnSuccess);
+    paid.register(lookupRoute);
+  });
   return server;
 }
