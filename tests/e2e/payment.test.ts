@@ -99,6 +99,23 @@ describe('unpaid requests', () => {
     expect(facilitator.verify).not.toHaveBeenCalled();
   });
 
+  // Behind Fly's proxy the app sees plain http; without trustProxy the challenge would advertise an
+  // http:// resource and a client's signed authorization URL would not match the https one it called.
+  it('advertises an https resource when the proxy says the client spoke https', async () => {
+    server = buildServer();
+
+    const res = await server.inject({
+      method: 'GET',
+      url: LOOKUP_URL,
+      headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'phone-intel-mcp.fly.dev' },
+    });
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json().accepts[0].resource).toBe('https://phone-intel-mcp.fly.dev/lookup/%2B15165551234');
+    const header = JSON.parse(Buffer.from(String(res.headers['x-payment-requirements']), 'base64').toString());
+    expect(header.accepts[0].resource).toBe(res.json().accepts[0].resource);
+  });
+
   // Fastify auto-registers HEAD for GET routes; an ungated HEAD would run composeDossier for free.
   it('unpaid HEAD /lookup returns 402 without touching composeDossier', async () => {
     server = buildServer();

@@ -29,6 +29,9 @@ class PhoneSafeLogController extends LogController {
 
 export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance {
   const server = Fastify({
+    // Fly terminates TLS in its proxy, so the app only sees http. Trusting X-Forwarded-Proto/Host
+    // makes request.protocol say https, and the x402 challenge's `resource` URL with it.
+    trustProxy: true,
     logger: {
       level: logStream || env.NODE_ENV !== 'test' ? 'info' : 'silent',
       stream: logStream,
