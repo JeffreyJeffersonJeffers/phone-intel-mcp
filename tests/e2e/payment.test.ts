@@ -449,6 +449,29 @@ describe('payer authentication before the slot', () => {
       auth.from = victim;
     });
 
+  // The attack as it was measured: forgeries naming one victim sent back to back while the victim keeps
+  // trying. The facilitator is slow (as a real one is), which is what let the forgeries pile up.
+  it('keeps a victim served through a burst of forgeries naming them', async () => {
+    server = buildServer();
+    facilitator.verify.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return { isValid: true, payer: PAYER };
+    });
+    const victimKey = newKey();
+    const victimAddress = fromOf(await pay({ payerPrivateKey: victimKey }));
+    const forgeries = await Promise.all(Array.from({ length: 40 }, () => forgedAs(victimAddress)));
+    const legit = await Promise.all(Array.from({ length: 8 }, () => pay({ payerPrivateKey: victimKey })));
+
+    const burst = Promise.all(forgeries.map((header) => paidGet(server, header)));
+    const victimResults = [];
+    for (const header of legit) victimResults.push(await paidGet(server, header)); // one after another
+    const forged = await burst;
+
+    expect(victimResults.map((r) => r.statusCode)).toEqual(Array(8).fill(200));
+    expect(forged.map((r) => r.statusCode)).toEqual(Array(40).fill(402));
+    expect(facilitator.verify).toHaveBeenCalledTimes(8); // only the victim's own payments reached it
+  });
+
   it('rejects a payment whose signature is not from the payer it names, without taking the payer slot', async () => {
     server = buildServer();
     const victimHeader = await pay({ payerPrivateKey: newKey() });
