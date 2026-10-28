@@ -36,7 +36,7 @@ Work through these in order. When you finish an account, write the credential na
 - [ ] Add $20 prepaid float (credit card required)
 - [ ] Dashboard → copy **Account SID** and **Auth Token**
 - [ ] Save as `TWILIO_SID` and `TWILIO_TOKEN`
-- [ ] In Console → Phone Numbers → **Lookup** → ensure "Line Type Intelligence" and "Caller Name" are enabled
+- [ ] (No toggle needed — Lookup v2 "Line Type Intelligence" and "Caller Name" are called per-request via the API's `Fields=` parameter. Billing kicks in only when the request includes them. Nothing to enable in the console.)
 
 **Expected time:** 15 min. **Cost:** $20 prepaid, drawn down at ~$0.015/lookup.
 
@@ -85,8 +85,7 @@ Work through these in order. When you finish an account, write the credential na
 - [ ] Create a new project named "phone-intel-mcp"
 - [ ] Project → API Keys → create a new server API key
 - [ ] Save the API Key Name + Private Key as `CDP_API_KEY` and `CDP_API_SECRET`
-- [ ] Project → Wallets → create a new **Server Wallet** on the **Base** network
-- [ ] Copy the wallet address → save as `WALLET_ADDRESS`
+- [ ] (No manual wallet creation — CDP server wallets are SDK-only. The implementer subagent creates the wallet via the SDK during Task 10 of the build; `WALLET_ADDRESS` is filled in then.)
 
 **Expected time:** 30–60 min including KYC. **Cost:** $0.
 
