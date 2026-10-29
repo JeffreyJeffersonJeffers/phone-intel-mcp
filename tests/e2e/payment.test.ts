@@ -100,6 +100,35 @@ describe('unpaid requests', () => {
     expect(facilitator.verify).not.toHaveBeenCalled();
   });
 
+  // The Bazaar (x402.new) only catalogs services whose 402 carries this block, which the Coinbase
+  // facilitator reads on verify/settle. Mirrors the live shape of v1 listings like api.onesource.io.
+  // Without it, our settled payments go uncatalogued and we are invisible to Bazaar-aware agents.
+  it('attaches the Bazaar discovery block on the 402 so the facilitator catalogs us', async () => {
+    server = buildServer();
+
+    const res = await server.inject({ method: 'GET', url: LOOKUP_URL });
+
+    expect(res.statusCode).toBe(402);
+    const body = res.json();
+    expect(body.extensions).toMatchObject({
+      bazaar: {
+        routeTemplate: '/lookup/:phone',
+        info: {
+          input: expect.objectContaining({ method: 'GET', type: 'http' }),
+          output: expect.objectContaining({ type: 'json' }),
+        },
+      },
+    });
+    // Agents viewing a listing see this example response.
+    expect(body.extensions.bazaar.info.output.example).toMatchObject({
+      number_classification: 'business',
+      carrier: { type: 'landline' },
+    });
+    // The x-payment-requirements header carries the same challenge as the body.
+    const header = JSON.parse(Buffer.from(String(res.headers['x-payment-requirements']), 'base64').toString());
+    expect(header.extensions.bazaar).toEqual(body.extensions.bazaar);
+  });
+
   // Behind Fly's proxy the app sees plain http; without trustProxy the challenge would advertise an
   // http:// resource and a client's signed authorization URL would not match the https one it called.
   it('advertises an https resource when the proxy says the client spoke https', async () => {

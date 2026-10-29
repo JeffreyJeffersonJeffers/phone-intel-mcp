@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest, onSendAsyncHookHandler, preHandlerAsyncHookHandler } from 'fastify';
 import type { PaymentPayload, PaymentRequirements } from 'x402/types';
+import { bazaarDiscovery } from './discovery.js';
 import { setPayer } from './payer.js';
 import {
   buildRequirements,
@@ -65,8 +66,15 @@ const verified = new WeakMap<FastifyRequest, VerifiedPayment>();
 
 // The 402 body is the standard x402 shape so stock clients (x402-fetch, x402-axios) can pay it.
 // The same challenge goes in x-payment-requirements, base64 JSON, for clients that read headers.
+// `extensions.bazaar` is the Bazaar discovery payload (src/payment/discovery.ts); the Coinbase CDP
+// facilitator reads it on verify/settle and catalogs us, which is how x402.new finds us.
 function challenge(error: string, requirements: PaymentRequirements) {
-  const body = { x402Version: X402_VERSION, error, accepts: [requirements] };
+  const body = {
+    x402Version: X402_VERSION,
+    error,
+    accepts: [requirements],
+    extensions: { bazaar: bazaarDiscovery() },
+  };
   return { body, header: Buffer.from(JSON.stringify(body)).toString('base64') };
 }
 
