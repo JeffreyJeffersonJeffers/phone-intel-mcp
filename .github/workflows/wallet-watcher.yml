@@ -1,0 +1,29 @@
+# Daily USDC inbound check for Jeff's receiving wallet. Opens a GitHub issue whenever paid
+# lookups show up in the last 25h, which GitHub emails Jeff about by default (notification
+# settings on the repo). Silent on days with no activity. 13:00 UTC = 9am Eastern (EDT),
+# 8am Eastern (EST) — matches Jeff's morning inbox check.
+
+name: Wallet watcher
+
+on:
+  schedule:
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run watcher
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/wallet-watcher.mjs
