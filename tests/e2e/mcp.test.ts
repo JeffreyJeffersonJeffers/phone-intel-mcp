@@ -141,6 +141,29 @@ describe('tool listing', () => {
   });
 });
 
+// Smithery and other registry scanners probe the full surface — resources/list and prompts/list
+// included — and flag an otherwise-healthy server when either answers "Method not found" (-32601)
+// instead of an empty list. We expose neither resources nor prompts, so both must answer with [].
+describe('registry probes', () => {
+  it('answers resources/list with an empty list, not Method not found', async () => {
+    const client = await connect();
+
+    const { resources } = await client.listResources();
+
+    expect(resources).toEqual([]);
+    expect(facilitator.verify).not.toHaveBeenCalled();
+  });
+
+  it('answers prompts/list with an empty list, not Method not found', async () => {
+    const client = await connect();
+
+    const { prompts } = await client.listPrompts();
+
+    expect(prompts).toEqual([]);
+    expect(facilitator.verify).not.toHaveBeenCalled();
+  });
+});
+
 describe('paid lookups', () => {
   it('returns the dossier and settles the payment', async () => {
     const client = await connect(payingFetch);
