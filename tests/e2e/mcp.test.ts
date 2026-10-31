@@ -11,8 +11,11 @@ import { buildTestPayment } from './buildTestPayment.js';
 
 // Same split as payment.test.ts: the facilitator is the only stubbed payment dependency, so the
 // real x402 gate runs on /mcp. compose is the whole vendor layer.
-const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn() }));
-vi.mock('x402/verify', () => ({ useFacilitator: () => facilitator }));
+const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn(), getSupported: vi.fn() }));
+vi.mock('@x402/core/http', async () => {
+  const actual = await vi.importActual<typeof import('@x402/core/http')>('@x402/core/http');
+  return { ...actual, HTTPFacilitatorClient: vi.fn().mockImplementation(() => facilitator) };
+});
 
 vi.mock('../../src/dossier/compose.js', () => ({ composeDossier: vi.fn() }));
 const compose = vi.mocked(composeDossier);
@@ -239,8 +242,8 @@ describe('unpaid lookups', () => {
     });
 
     expect(res.statusCode).toBe(402);
-    expect(res.headers).toHaveProperty('x-payment-requirements');
-    expect(res.json()).toMatchObject({ x402Version: 1, error: 'X-PAYMENT header is required' });
+    expect(res.headers).toHaveProperty('payment-required');
+    expect(res.json()).toMatchObject({ x402Version: 2, error: 'X-PAYMENT header is required' });
     expect(compose).not.toHaveBeenCalled();
   });
 

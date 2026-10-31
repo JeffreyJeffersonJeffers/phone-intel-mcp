@@ -8,8 +8,11 @@ import { buildTestPayment } from './buildTestPayment.js';
 
 // Same split as payment.test.ts: the facilitator and the vendor layer (compose) are stubbed, the
 // x402 gate, the rate limiter and the routes are the real thing.
-const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn() }));
-vi.mock('x402/verify', () => ({ useFacilitator: () => facilitator }));
+const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn(), getSupported: vi.fn() }));
+vi.mock('@x402/core/http', async () => {
+  const actual = await vi.importActual<typeof import('@x402/core/http')>('@x402/core/http');
+  return { ...actual, HTTPFacilitatorClient: vi.fn().mockImplementation(() => facilitator) };
+});
 
 vi.mock('../../src/dossier/compose.js', () => ({ composeDossier: vi.fn() }));
 const compose = vi.mocked(composeDossier);

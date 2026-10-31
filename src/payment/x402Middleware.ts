@@ -1,8 +1,10 @@
+import { encodePaymentRequiredHeader } from '@x402/core/http';
+import type { PaymentPayload, PaymentRequired, PaymentRequirements } from '@x402/core/types';
 import type { FastifyReply, FastifyRequest, onSendAsyncHookHandler, preHandlerAsyncHookHandler } from 'fastify';
-import type { PaymentPayload, PaymentRequirements } from 'x402/types';
 import { bazaarDiscovery } from './discovery.js';
 import { setPayer } from './payer.js';
 import {
+  buildPaymentRequired,
   buildRequirements,
   getFacilitator,
   getWalletAddress,
@@ -13,16 +15,15 @@ import {
   type UsdcAmount,
 } from './wallet.js';
 
-// x402 v1 (https://github.com/coinbase/x402) as a Fastify gate. A paid call is two hooks:
-//   preHandler  requirePayment()      402 challenge if no valid X-PAYMENT, else verify and continue
+// x402 v2 (https://github.com/x402-foundation/x402) as a Fastify gate. A paid call is two hooks:
+//   preHandler  requirePayment()      402 challenge if no valid PAYMENT-SIGNATURE/X-PAYMENT, else
+//                                     verify and continue
 //   onSend      settleOnSuccess()     once the handler has answered 2xx/3xx, move the USDC
 // The money moves only after a successful lookup, so a malformed phone or a vendor failure is
 // never charged, and if settlement fails the dossier is withheld (402), never given away.
 //
 // Logging: this file logs payment status only. Never the request path (for /lookup/:phone that is
-// the phone number), the X-PAYMENT header, or an error object.
-
-const X402_VERSION = 1;
+// the phone number), the payment header, or an error object.
 
 // One request per paying wallet at a time. The facilitator checks a payer's balance per call, not
 // cumulatively, so a payer with 0.03 USDC could sign N authorizations with different nonces, send
@@ -64,23 +65,28 @@ interface VerifiedPayment {
 }
 const verified = new WeakMap<FastifyRequest, VerifiedPayment>();
 
-// The 402 body is the standard x402 shape so stock clients (x402-fetch, x402-axios) can pay it.
-// The same challenge goes in x-payment-requirements, base64 JSON, for clients that read headers.
-// `extensions.bazaar` is the Bazaar discovery payload (src/payment/discovery.ts); the Coinbase CDP
-// facilitator reads it on verify/settle and catalogs us, which is how x402.new finds us.
-function challenge(error: string, requirements: PaymentRequirements) {
-  const body = {
-    x402Version: X402_VERSION,
-    error,
-    accepts: [requirements],
-    extensions: { bazaar: bazaarDiscovery() },
-  };
-  return { body, header: Buffer.from(JSON.stringify(body)).toString('base64') };
+// v2 clients read the base64 PaymentRequired from the `payment-required` response header.
+// We also send the same object as the JSON body so simple clients (and inspection tools) can see
+// what is being asked without base64-decoding a header. The Coinbase CDP facilitator reads
+// `extensions.bazaar` (src/payment/discovery.ts) during verify/settle and catalogs the service in
+// the Bazaar, which is what x402.new indexes from.
+function challenge(
+  resourceUrl: string,
+  error: string | undefined,
+  requirements: PaymentRequirements,
+): { body: PaymentRequired; header: string } {
+  const body = buildPaymentRequired(resourceUrl, error, requirements, { bazaar: bazaarDiscovery() });
+  return { body, header: encodePaymentRequiredHeader(body) };
 }
 
-function paymentRequired(reply: FastifyReply, error: string, requirements: PaymentRequirements) {
-  const { body, header } = challenge(error, requirements);
-  return reply.code(402).header('x-payment-requirements', header).send(body);
+function paymentRequired(
+  reply: FastifyReply,
+  resourceUrl: string,
+  error: string,
+  requirements: PaymentRequirements,
+) {
+  const { body, header } = challenge(resourceUrl, error, requirements);
+  return reply.code(402).header('payment-required', header).send(body);
 }
 
 export function requirePayment(amountUsdc: UsdcAmount, network: PaymentNetwork): preHandlerAsyncHookHandler {
@@ -91,18 +97,19 @@ export function requirePayment(amountUsdc: UsdcAmount, network: PaymentNetwork):
 
   return async (request, reply) => {
     const origin = `${request.protocol}://${request.host}`;
-    // The client already knows its own URL, so the challenge may name it. What goes to the
-    // facilitator (a third party) is the route pattern instead, so no phone number leaves here.
-    const requirements = buildRequirements(amountUsdc, network, `${origin}${request.url}`);
-    const facilitatorResource = `${origin}${request.routeOptions.url ?? '/'}`;
+    // The client already knows its own URL, so the challenge may name it.
+    const resourceUrl = `${origin}${request.url}`;
+    const requirements = buildRequirements(amountUsdc, network);
 
-    const header = request.headers['x-payment'];
+    // Accept both header names: PAYMENT-SIGNATURE is the v2 canonical name; X-PAYMENT is the v1
+    // name that most existing clients still send.
+    const header = request.headers['payment-signature'] ?? request.headers['x-payment'];
     if (typeof header !== 'string' || header === '') {
       request.log.info({ payment: 'missing' }, 'payment required');
-      return paymentRequired(reply, 'X-PAYMENT header is required', requirements);
+      return paymentRequired(reply, resourceUrl, 'X-PAYMENT header is required', requirements);
     }
 
-    const result = await verifyPayment(header, amountUsdc, network, facilitatorResource, admitPayer);
+    const result = await verifyPayment(header, amountUsdc, network, admitPayer);
     if (!result.ok) {
       if (result.concurrent) {
         request.log.info({ payment: 'concurrent_request' }, 'payer already has a request in flight');
@@ -115,7 +122,7 @@ export function requirePayment(amountUsdc: UsdcAmount, network: PaymentNetwork):
       // the second one needs someone to look at it. Status only, never the error itself.
       if (result.facilitatorError) request.log.error({ payment: 'facilitator_error' }, 'facilitator error');
       else request.log.info({ payment: 'rejected' }, 'payment rejected');
-      return paymentRequired(reply, result.reason, requirements);
+      return paymentRequired(reply, resourceUrl, result.reason, requirements);
     }
     verified.set(request, {
       payload: result.payload,
@@ -166,12 +173,16 @@ async function settleVerified(
   if (!settlement.ok) {
     if (settlement.facilitatorError) request.log.error({ payment: 'facilitator_error' }, 'facilitator error');
     else request.log.warn({ payment: 'settlement_failed' }, 'payment settlement failed');
-    // Replace the dossier with the 402. The body is serialized by hand: onSend runs after Fastify's
-    // own serialization, so it takes the final payload string.
-    const { body, header } = challenge(settlement.reason, payment.requirements);
-    reply.code(402).header('x-payment-requirements', header);
+    // Replace the dossier with the 402. The body is serialized by hand: onSend runs after
+    // Fastify's own serialization, so it takes the final payload string.
+    const origin = `${request.protocol}://${request.host}`;
+    const resourceUrl = `${origin}${request.url}`;
+    const { body, header } = challenge(resourceUrl, settlement.reason, payment.requirements);
+    reply.code(402).header('payment-required', header);
     return JSON.stringify(body);
   }
+  // Modern (v2) and compat (v1) response header names so both generations of clients can read it.
+  reply.header('payment-response', settlement.header);
   reply.header('x-payment-response', settlement.header);
   request.log.info({ payment: 'settled' }, 'payment settled');
   return payload;

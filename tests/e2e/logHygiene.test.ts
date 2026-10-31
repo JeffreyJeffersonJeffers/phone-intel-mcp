@@ -9,8 +9,11 @@ import { buildTestPayment } from './buildTestPayment.js';
 
 // What a lookup is allowed to leave in the logs. The facilitator and the vendor layer are stubbed;
 // the x402 gate, both routes, the MCP transport and Fastify's own error paths are the real thing.
-const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn() }));
-vi.mock('x402/verify', () => ({ useFacilitator: () => facilitator }));
+const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn(), getSupported: vi.fn() }));
+vi.mock('@x402/core/http', async () => {
+  const actual = await vi.importActual<typeof import('@x402/core/http')>('@x402/core/http');
+  return { ...actual, HTTPFacilitatorClient: vi.fn().mockImplementation(() => facilitator) };
+});
 
 vi.mock('../../src/dossier/compose.js', () => ({ composeDossier: vi.fn() }));
 const compose = vi.mocked(composeDossier);
