@@ -2,6 +2,8 @@
 
 One call turns a US phone number into a dossier: carrier and line type, the business that owns it (name, category, address, hours, open-now, rating), and a spam/robocall reputation score. It is built for AI agents (voice agents screening inbound calls, outbound dialers, lead-qualification and fraud workflows) that need to know who is behind a number in under two seconds, without a human signing up for four vendor accounts. Pay per call in USDC over [x402](https://www.x402.org) ([spec and reference code](https://github.com/coinbase/x402)); no API key, no account.
 
+**Listed on:** [PayAPI Market](https://payapi.market/api/phone-intel-mcp) · [mcp.so](https://mcp.so/servers/phone-intel-mcp)
+
 | | |
 |---|---|
 | Base URL | `https://phone-intel-mcp.fly.dev` |
