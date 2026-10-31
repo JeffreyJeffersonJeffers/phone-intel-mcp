@@ -1,19 +1,22 @@
 import { randomBytes } from 'node:crypto';
 import { Writable } from 'node:stream';
-import { VerifyError } from 'x402/types';
+import { VerifyError } from '@x402/core/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { composeDossier } from '../../src/dossier/compose.js';
 import type { Dossier } from '../../src/dossier/types.js';
 import { env } from '../../src/env.js';
 import { buildServer } from '../../src/server.js';
-import { buildTestPayment, mutateAuthorization, toAtomicUsdc, usdcAddress } from './buildTestPayment.js';
+import { buildTestPayment, caip2Of, toAtomicUsdc, mutateAuthorization, usdcAddress } from './buildTestPayment.js';
 
 // The facilitator (Coinbase's reference verifier/settler) is the only network dependency of the
 // payment path, so stubbing it keeps these tests deterministic and free. The real thing is
 // exercised by payment-live.test.ts. Everything else, header decoding, requirement building,
 // the local checks and the Fastify hooks, is the production code.
-const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn() }));
-vi.mock('x402/verify', () => ({ useFacilitator: () => facilitator }));
+const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn(), getSupported: vi.fn() }));
+vi.mock('@x402/core/http', async () => {
+  const actual = await vi.importActual<typeof import('@x402/core/http')>('@x402/core/http');
+  return { ...actual, HTTPFacilitatorClient: vi.fn().mockImplementation(() => facilitator) };
+});
 
 // compose is the whole vendor layer, so "composeDossier not called" proves no vendor spend.
 vi.mock('../../src/dossier/compose.js', () => ({ composeDossier: vi.fn() }));
@@ -72,7 +75,7 @@ beforeEach(() => {
   facilitator.verify.mockReset();
   facilitator.verify.mockResolvedValue({ isValid: true, payer: PAYER });
   facilitator.settle.mockReset();
-  facilitator.settle.mockResolvedValue({ success: true, transaction: TX, network: 'base-sepolia', payer: PAYER });
+  facilitator.settle.mockResolvedValue({ success: true, transaction: TX, network: caip2Of('base-sepolia'), payer: PAYER });
 });
 
 describe('unpaid requests', () => {
@@ -82,20 +85,22 @@ describe('unpaid requests', () => {
     const res = await server.inject({ method: 'GET', url: LOOKUP_URL });
 
     expect(res.statusCode).toBe(402);
-    expect(res.headers).toHaveProperty('x-payment-requirements');
-    // The header carries the same challenge as the body (x402 v1: { x402Version, error, accepts }).
-    const challenge = JSON.parse(Buffer.from(String(res.headers['x-payment-requirements']), 'base64').toString());
+    expect(res.headers).toHaveProperty('payment-required');
+    // The payment-required header carries the same v2 PaymentRequired as the body:
+    // { x402Version: 2, error, resource, accepts, extensions }.
+    const challenge = JSON.parse(Buffer.from(String(res.headers['payment-required']), 'base64').toString());
     expect(challenge).toEqual(res.json());
-    expect(challenge).toMatchObject({ x402Version: 1, error: 'X-PAYMENT header is required' });
+    expect(challenge).toMatchObject({ x402Version: 2, error: 'X-PAYMENT header is required' });
     expect(challenge.accepts).toHaveLength(1);
     expect(challenge.accepts[0]).toMatchObject({
       scheme: 'exact',
-      network: 'base-sepolia', // NODE_ENV=test is not production
-      maxAmountRequired: toAtomicUsdc('0.03'), // 0.03 USDC
+      network: caip2Of('base-sepolia'), // NODE_ENV=test is not production
+      amount: toAtomicUsdc('0.03'), // 0.03 USDC
       asset: usdcAddress('base-sepolia'),
       payTo: env.WALLET_ADDRESS,
     });
-    expect(challenge.accepts[0].resource).toMatch(/^http:\/\/.+\/lookup\/%2B15165551234$/);
+    // Resource moved from accepts[i].resource (v1) to the top-level PaymentRequired.resource (v2).
+    expect(challenge.resource.url).toMatch(/^http:\/\/.+\/lookup\/%2B15165551234$/);
     expect(compose).not.toHaveBeenCalled();
     expect(facilitator.verify).not.toHaveBeenCalled();
   });
@@ -124,8 +129,8 @@ describe('unpaid requests', () => {
       number_classification: 'business',
       carrier: { type: 'landline' },
     });
-    // The x-payment-requirements header carries the same challenge as the body.
-    const header = JSON.parse(Buffer.from(String(res.headers['x-payment-requirements']), 'base64').toString());
+    // The payment-required header carries the same challenge as the body.
+    const header = JSON.parse(Buffer.from(String(res.headers['payment-required']), 'base64').toString());
     expect(header.extensions.bazaar).toEqual(body.extensions.bazaar);
   });
 
@@ -141,9 +146,9 @@ describe('unpaid requests', () => {
     });
 
     expect(res.statusCode).toBe(402);
-    expect(res.json().accepts[0].resource).toBe('https://phone-intel-mcp.fly.dev/lookup/%2B15165551234');
-    const header = JSON.parse(Buffer.from(String(res.headers['x-payment-requirements']), 'base64').toString());
-    expect(header.accepts[0].resource).toBe(res.json().accepts[0].resource);
+    expect(res.json().resource.url).toBe('https://phone-intel-mcp.fly.dev/lookup/%2B15165551234');
+    const header = JSON.parse(Buffer.from(String(res.headers['payment-required']), 'base64').toString());
+    expect(header.resource.url).toBe(res.json().resource.url);
   });
 
   // Fastify auto-registers HEAD for GET routes; an ungated HEAD would run composeDossier for free.
@@ -153,7 +158,7 @@ describe('unpaid requests', () => {
     const res = await server.inject({ method: 'HEAD', url: LOOKUP_URL });
 
     expect(res.statusCode).toBe(402);
-    expect(res.headers).toHaveProperty('x-payment-requirements');
+    expect(res.headers).toHaveProperty('payment-required');
     expect(compose).not.toHaveBeenCalled();
     expect(facilitator.verify).not.toHaveBeenCalled();
   });
@@ -181,7 +186,7 @@ describe('paid requests', () => {
     expect(facilitator.verify).toHaveBeenCalledTimes(1);
     expect(facilitator.settle).toHaveBeenCalledTimes(1);
     const settlement = JSON.parse(Buffer.from(String(res.headers['x-payment-response']), 'base64').toString());
-    expect(settlement).toMatchObject({ success: true, transaction: TX, network: 'base-sepolia' });
+    expect(settlement).toMatchObject({ success: true, transaction: TX, network: caip2Of('base-sepolia') });
   });
 
   it('asks the facilitator to verify and settle exactly 0.03 USDC to the configured wallet', async () => {
@@ -191,11 +196,12 @@ describe('paid requests', () => {
 
     for (const call of [facilitator.verify.mock.calls[0], facilitator.settle.mock.calls[0]]) {
       const [payload, requirements] = call;
-      expect(payload).toMatchObject({ x402Version: 1, scheme: 'exact', network: 'base-sepolia' });
+      // v2 PaymentPayload: scheme/network moved into `accepted`.
+      expect(payload).toMatchObject({ x402Version: 2, accepted: { scheme: 'exact', network: caip2Of('base-sepolia') } });
       expect(requirements).toMatchObject({
         scheme: 'exact',
-        network: 'base-sepolia',
-        maxAmountRequired: '30000',
+        network: caip2Of('base-sepolia'),
+        amount: '30000',
         payTo: env.WALLET_ADDRESS,
         asset: usdcAddress('base-sepolia'),
       });
@@ -240,13 +246,13 @@ describe('paid requests', () => {
       success: false,
       errorReason: 'insufficient_funds',
       transaction: '',
-      network: 'base-sepolia',
+      network: caip2Of('base-sepolia'),
     });
 
     const res = await paidGet(server, await pay());
 
     expect(res.statusCode).toBe(402);
-    expect(res.json()).toMatchObject({ x402Version: 1, error: 'insufficient_funds' });
+    expect(res.json()).toMatchObject({ x402Version: 2, error: 'insufficient_funds' });
     expect(res.body).not.toContain('Verizon');
     expect(res.headers).not.toHaveProperty('x-payment-response');
   });
@@ -280,9 +286,9 @@ describe('rejected payments', () => {
     const res = await paidGet(server, await pay());
 
     expect(res.statusCode).toBe(402);
-    expect(res.json()).toMatchObject({ x402Version: 1, error: 'insufficient_funds' });
+    expect(res.json()).toMatchObject({ x402Version: 2, error: 'insufficient_funds' });
     expect(res.json().accepts).toHaveLength(1);
-    expect(res.headers).toHaveProperty('x-payment-requirements');
+    expect(res.headers).toHaveProperty('payment-required');
     expect(compose).not.toHaveBeenCalled();
     expect(facilitator.settle).not.toHaveBeenCalled();
   });
@@ -733,7 +739,7 @@ describe('per-payer in-flight cap', () => {
             success: false,
             errorReason: 'insufficient_funds',
             transaction: '',
-            network: 'base-sepolia',
+            network: caip2Of('base-sepolia'),
           }),
         402,
       ],
@@ -797,7 +803,7 @@ describe('per-payer in-flight cap', () => {
     const inFlight = paidGet(server, first!);
     await vi.waitFor(() => expect(facilitator.settle).toHaveBeenCalledTimes(1)); // vendors done, settling
     const mid = await paidGet(server, second!);
-    settle.resolve({ success: true, transaction: TX, network: 'base-sepolia', payer: PAYER });
+    settle.resolve({ success: true, transaction: TX, network: caip2Of('base-sepolia'), payer: PAYER });
     await inFlight;
 
     expect(mid.statusCode).toBe(429);
@@ -900,7 +906,7 @@ describe('payment logging', () => {
     it('logs a settlement the facilitator refused as settlement_failed', async () => {
       const logs = captureLogs();
       server = buildServer({ logStream: logs.stream });
-      facilitator.settle.mockResolvedValue({ success: false, errorReason: 'insufficient_funds', transaction: '', network: 'base-sepolia' });
+      facilitator.settle.mockResolvedValue({ success: false, errorReason: 'insufficient_funds', transaction: '', network: caip2Of('base-sepolia') });
 
       await paidGet(server, await pay());
 

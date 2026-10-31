@@ -1,11 +1,12 @@
 // x402 Bazaar discovery metadata (https://docs.cdp.coinbase.com/x402/seller/get-discovered).
-// Attached to the 402 challenge body as `extensions.bazaar`. The Coinbase CDP facilitator reads
+// Attached to the 402 PaymentRequired as `extensions.bazaar`. The Coinbase CDP facilitator reads
 // this during verify/settle and catalogs the service in the Bazaar, which is what x402.new indexes
 // from. Services that settle payments without this block are not catalogued, so dropping it means
 // going invisible to Bazaar-aware agents — not a crash, but a silent regression.
 //
-// Shape mirrors live v1 listings (e.g. api.onesource.io): a top-level info/schema/routeTemplate
-// triple. The example dossier matches README's illustrative response.
+// Shape is the v2 QueryDiscoveryExtension (@x402/extensions/bazaar): a top-level
+// info/schema/routeTemplate triple. pathParams is used because `/lookup/:phone` is a path param,
+// not a query string. The example dossier matches README's illustrative response.
 
 const EXAMPLE_DOSSIER = {
   phone: '+15165551234',

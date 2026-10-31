@@ -6,8 +6,11 @@ import { buildTestPayment, mutateAuthorization } from '../../e2e/buildTestPaymen
 // token address) from our own requirements. The e2e tests run on base-sepolia; production is `base`,
 // whose domain differs ("USD Coin", chain 8453), and no other test signs for it. buildTestPayment
 // carries independent mainnet constants, so a wrong domain here makes this fail.
-const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn() }));
-vi.mock('x402/verify', () => ({ useFacilitator: () => facilitator }));
+const facilitator = vi.hoisted(() => ({ verify: vi.fn(), settle: vi.fn(), getSupported: vi.fn() }));
+vi.mock('@x402/core/http', async () => {
+  const actual = await vi.importActual<typeof import('@x402/core/http')>('@x402/core/http');
+  return { ...actual, HTTPFacilitatorClient: vi.fn().mockImplementation(() => facilitator) };
+});
 
 const WALLET = '0x1111111111111111111111111111111111111111';
 const newKey = () => `0x${randomBytes(32).toString('hex')}`;
@@ -34,7 +37,7 @@ describe('payer signature check on Base mainnet', () => {
     const { verifyPayment } = await loadWallet();
     const header = await buildTestPayment({ amount: '0.03', network: 'base', to: WALLET, payerPrivateKey: newKey() });
 
-    const result = await verifyPayment(header, '0.03', 'base', 'https://example.test/lookup/:phone', admit);
+    const result = await verifyPayment(header, '0.03', 'base', admit);
 
     expect(result).toMatchObject({ ok: true });
     expect(facilitator.verify).toHaveBeenCalledTimes(1);
@@ -50,7 +53,7 @@ describe('payer signature check on Base mainnet', () => {
       },
     );
 
-    const result = await verifyPayment(forged, '0.03', 'base', 'https://example.test/lookup/:phone', admit);
+    const result = await verifyPayment(forged, '0.03', 'base', admit);
 
     expect(result).toMatchObject({ ok: false, reason: 'invalid_exact_evm_payload_signature' });
     expect(facilitator.verify).not.toHaveBeenCalled();
