@@ -10,6 +10,7 @@ import { env } from './env.js';
 import { healthRoute } from './http/healthRoute.js';
 import { lookupRoute, REJECTION_MESSAGES } from './http/lookupRoute.js';
 import { mcpRoute } from './http/mcpRoute.js';
+import { openapiRoute } from './http/openapiRoute.js';
 import { redact, safeErrorMessage } from './lib/logSafe.js';
 import { phoneHashKey } from './lib/phoneHash.js';
 import { createWalletRateLimiter, walletRateLimit } from './middleware/rateLimit.js';
@@ -132,6 +133,7 @@ export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance 
   const limitWallet = walletRateLimit(createWalletRateLimiter());
 
   server.register(healthRoute);
+  server.register(openapiRoute);
   // Hooks added in this encapsulated context cover every route registered in it, including the
   // HEAD route Fastify auto-creates for GET /lookup/:phone, so HEAD can't run vendors unpaid.
   // /health is registered outside it and stays free.
