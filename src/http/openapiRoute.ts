@@ -83,6 +83,13 @@ function buildOpenapi(host: string, protocol: string) {
           responses: { '200': { description: 'Server is up.' } },
         },
       },
+      '/stats': {
+        get: {
+          summary: 'Service-wide stats (cache hit rate, p50/p95 latency, total lookups, uptime)',
+          operationId: 'stats',
+          responses: { '200': { description: 'Aggregate counters since the current process started. No per-caller data.' } },
+        },
+      },
     },
     components: {
       schemas: {

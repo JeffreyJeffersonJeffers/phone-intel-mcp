@@ -8,6 +8,7 @@ import { safeErrorMessage } from '../../lib/logSafe.js';
 import { normalizePhone } from '../../lib/phone.js';
 import { hashPhone } from '../../lib/phoneHash.js';
 import { lookupLogFields } from '../../middleware/requestLog.js';
+import { recordLookup } from '../../stats/counters.js';
 
 export const LOOKUP_TOOL_NAME = 'phone_intel.lookup';
 
@@ -81,9 +82,11 @@ export function registerLookupTool(server: McpServer, { priceUsdc, log, latencyM
     async ({ phone }): Promise<CallToolResult> => {
       const normalized = normalizePhone(phone);
       if ('error' in normalized) {
+        const ms = latencyMs();
+        recordLookup({ status: 400, latencyMs: ms, cacheHits: [] });
         log.info(
           {
-            ...lookupLogFields({ status: 400, latencyMs: latencyMs(), phoneHash: null, cacheHits: [] }),
+            ...lookupLogFields({ status: 400, latencyMs: ms, phoneHash: null, cacheHits: [] }),
             error_code: normalized.error,
           },
           'mcp lookup rejected',
@@ -94,11 +97,13 @@ export function registerLookupTool(server: McpServer, { priceUsdc, log, latencyM
       const phoneHash = hashPhone(normalized.e164);
       try {
         const dossier = await composeDossier(normalized.e164);
+        const ms = latencyMs();
+        recordLookup({ status: 200, latencyMs: ms, cacheHits: dossier.meta.cached_fields });
         log.info(
           {
             ...lookupLogFields({
               status: 200,
-              latencyMs: latencyMs(),
+              latencyMs: ms,
               phoneHash,
               cacheHits: dossier.meta.cached_fields,
             }),
@@ -109,18 +114,22 @@ export function registerLookupTool(server: McpServer, { priceUsdc, log, latencyM
         return { content: [{ type: 'text', text: JSON.stringify(dossier) }], structuredContent: { ...dossier } };
       } catch (err) {
         if (err instanceof AggregateError) {
+          const ms = latencyMs();
+          recordLookup({ status: 502, latencyMs: ms, cacheHits: [] });
           log.error(
             {
-              ...lookupLogFields({ status: 502, latencyMs: latencyMs(), phoneHash, cacheHits: [] }),
+              ...lookupLogFields({ status: 502, latencyMs: ms, phoneHash, cacheHits: [] }),
               adapter_errors: err.errors.map(safeErrorMessage),
             },
             'mcp lookup failed: vendor failure',
           );
           return toolError('vendor_failure');
         }
+        const ms = latencyMs();
+        recordLookup({ status: 500, latencyMs: ms, cacheHits: [] });
         log.error(
           {
-            ...lookupLogFields({ status: 500, latencyMs: latencyMs(), phoneHash, cacheHits: [] }),
+            ...lookupLogFields({ status: 500, latencyMs: ms, phoneHash, cacheHits: [] }),
             error_message: safeErrorMessage(err),
           },
           'mcp lookup failed: unexpected error',
