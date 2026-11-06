@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Phone Intel MCP logo">
+  <title>Phone Intel MCP</title>
+  <rect width="256" height="256" rx="52" fill="#0b1220"/>
+  <text x="50%" y="56%" text-anchor="middle" dominant-baseline="middle"
+        font-family="Inter, 'SF Pro Display', 'Segoe UI', system-ui, -apple-system, sans-serif"
+        font-weight="800" font-size="136" fill="#60a5fa" letter-spacing="-6">PI</text>
+  <circle cx="200" cy="60" r="11" fill="#22d3ee"/>
+</svg>
