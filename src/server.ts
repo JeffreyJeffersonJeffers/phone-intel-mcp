@@ -8,6 +8,7 @@ import Fastify, {
 } from 'fastify';
 import { env } from './env.js';
 import { healthRoute } from './http/healthRoute.js';
+import { llmsTxtRoute } from './http/llmsTxtRoute.js';
 import { lookupRoute, REJECTION_MESSAGES } from './http/lookupRoute.js';
 import { mcpRoute } from './http/mcpRoute.js';
 import { openapiRoute } from './http/openapiRoute.js';
@@ -136,6 +137,7 @@ export function buildServer({ logStream }: ServerOptions = {}): FastifyInstance 
   server.register(healthRoute);
   server.register(openapiRoute);
   server.register(statsRoute);
+  server.register(llmsTxtRoute);
   // Hooks added in this encapsulated context cover every route registered in it, including the
   // HEAD route Fastify auto-creates for GET /lookup/:phone, so HEAD can't run vendors unpaid.
   // /health is registered outside it and stays free.

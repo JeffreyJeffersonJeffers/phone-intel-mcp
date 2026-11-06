@@ -90,6 +90,13 @@ function buildOpenapi(host: string, protocol: string) {
           responses: { '200': { description: 'Aggregate counters since the current process started. No per-caller data.' } },
         },
       },
+      '/llms.txt': {
+        get: {
+          summary: 'Agent discovery summary (llmstxt.org convention)',
+          operationId: 'llmsTxt',
+          responses: { '200': { description: 'Concise markdown description of the service for AI discovery crawlers.' } },
+        },
+      },
     },
     components: {
       schemas: {

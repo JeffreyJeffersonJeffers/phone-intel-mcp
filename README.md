@@ -23,6 +23,7 @@ You'll get **HTTP 402** with a `payment-required` response header (base64) and a
 | MCP | `POST /mcp` (Streamable HTTP), tool `phone_intel.lookup` |
 | Discovery | `GET /openapi.json` (OpenAPI 3.1 with `x-payment-info`) |
 | Stats | `GET /stats` (aggregate counters: cache hit rate, p50/p95 latency, total lookups, uptime) |
+| Agent summary | `GET /llms.txt` (concise markdown description per [llmstxt.org](https://llmstxt.org)) |
 | Health | `GET /health` |
 | Price | **$0.03 USDC per lookup**, on **Base mainnet** |
 | Payment protocol | x402 **v2** (CAIP-2 network `eip155:8453`, `exact` scheme, `payment-required` + `PAYMENT-SIGNATURE` + `payment-response` headers). v1 clients (`X-PAYMENT` / `x-payment-response`) are also accepted for backward compatibility. |
@@ -193,7 +194,7 @@ Errors other than 402 share one envelope: `{ "error": { "code": "...", "message"
 - **EOA (externally-owned account) signatures only.** Smart-contract wallets (ERC-1271 / 6492: Safe, Coinbase Smart Wallet, Argent, etc.) are not supported. A payment whose signature is not a 65-byte signature by the wallet it names is rejected with `402 invalid_exact_evm_payload_signature` before anything is run.
 - **p95 target under 2 seconds** for the lookup itself. Each vendor is bounded at 900 ms and a slow one degrades rather than blocking, with one exception: Yelp is bounded at 2.5 s (see the next point), so a number that has a business can take up to about 3.4 s. Payment verification and settlement are extra round trips on top of that.
 - **Yelp calls route through a Vercel edge function** (`https://phone-intel-yelp-proxy.vercel.app`), because Yelp blocks datacenter IPs. It adds an extra network hop, typically well under a second, to uncached business lookups; a repeat lookup of the same number is served from the cache and does not call it. If the proxy is slow or unreachable the lookup still succeeds, with `business_match` `null`.
-- `GET /health`, `GET /openapi.json`, `GET /stats`, MCP `initialize` and `tools/list` are free and never rate limited.
+- `GET /health`, `GET /openapi.json`, `GET /stats`, `GET /llms.txt`, MCP `initialize` and `tools/list` are free and never rate limited.
 
 ## Health
 
