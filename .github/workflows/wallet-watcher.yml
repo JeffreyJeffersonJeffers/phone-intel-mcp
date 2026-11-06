@@ -1,7 +1,12 @@
-# Daily USDC inbound check for Jeff's receiving wallet. Opens a GitHub issue whenever paid
-# lookups show up in the last 25h, which GitHub emails Jeff about by default (notification
-# settings on the repo). Silent on days with no activity. 13:00 UTC = 9am Eastern (EDT),
-# 8am Eastern (EST) — matches Jeff's morning inbox check.
+# Daily USDC inbound check for Jeff's receiving wallet. Sends an email to Jeff via Gmail SMTP
+# whenever paid lookups show up in the last 25h. Silent on days with no customer activity.
+# 13:00 UTC = 9am Eastern (EDT), 8am Eastern (EST) — matches Jeff's morning inbox check.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   GMAIL_USER          — the Gmail address that sends the mail (e.g. jeffrey.shaw4@gmail.com)
+#   GMAIL_APP_PASSWORD  — Gmail App Password (16 chars, generated at
+#                         https://myaccount.google.com/apppasswords; requires 2FA on the account)
+#   NOTIFY_EMAIL        — optional; address to deliver to. Defaults to GMAIL_USER.
 
 name: Wallet watcher
 
@@ -12,7 +17,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   check:
@@ -22,8 +26,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+      - name: Install deps
+        run: npm ci --omit=dev
       - name: Run watcher
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
         run: node scripts/wallet-watcher.mjs

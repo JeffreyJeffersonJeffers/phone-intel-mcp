@@ -1,13 +1,22 @@
 // Daily check for USDC transfers to the receiving wallet. Reads Transfer events on Base's public
-// RPC and opens a GitHub issue when any transfer landed in the last window. GitHub emails the repo
-// owner on new issues, so Jeff finds out at his first morning inbox check.
+// RPC and sends Jeff a Gmail email when any transfer landed in the last window. Silent on days
+// with no customer activity.
 //
-// No deps, no secrets beyond the GITHUB_TOKEN the workflow already has. The 25h window has a 1h
-// overlap with the previous day's window to tolerate the cron slipping slightly.
+// Setup (one-time):
+//   1. On the Google account you want to send from, turn on 2-Step Verification.
+//   2. Generate a Gmail App Password at https://myaccount.google.com/apppasswords (name it
+//      something like "phone-intel-mcp wallet-watcher"). Copy the 16-char password.
+//   3. Add two GitHub repo secrets:
+//        GMAIL_USER         — the Gmail address that will BE the sender (e.g. jeffrey.shaw4@gmail.com)
+//        GMAIL_APP_PASSWORD — the 16-char app password from step 2
+//   4. Optional: NOTIFY_EMAIL secret — the address to deliver to. Defaults to GMAIL_USER.
 //
 // Run locally for a smoke test:
-//   GITHUB_TOKEN=... GITHUB_REPOSITORY=JeffreyJeffersonJeffers/phone-intel-mcp node scripts/wallet-watcher.mjs
-// Pass DRY_RUN=1 to print the issue body without creating one.
+//   GMAIL_USER=you@gmail.com GMAIL_APP_PASSWORD=xxxx NOTIFY_EMAIL=you@gmail.com \
+//     node scripts/wallet-watcher.mjs
+// Pass DRY_RUN=1 to print the email body without sending.
+
+import nodemailer from 'nodemailer';
 
 // Public Base RPCs. We rotate on rate-limit errors; order picks the one that has been most
 // generous with eth_getLogs windows in practice.
@@ -29,7 +38,7 @@ const BLOCKS_PER_HOUR = 1800;
 const WINDOW_BLOCKS = BigInt(WINDOW_HOURS * BLOCKS_PER_HOUR);
 // Public RPCs cap eth_getLogs ranges and req/sec. 1000 blocks is the safest universal cap.
 const CHUNK = 1000n;
-// Our own test payer. Flagged in the issue body but not filtered — a tx from this address means
+// Our own test payer. Flagged in the email body but not filtered — a tx from this address means
 // we hit the service ourselves, not a real customer.
 const TEST_PAYER = '0xc6d4ffab1bfd5a2976d90fca6ebb32c2b1a16935';
 
@@ -114,53 +123,83 @@ async function main() {
     ? `${realCount} new lookup${realCount === 1 ? '' : 's'} from the wild`
     : `${logs.length} test lookup${logs.length === 1 ? '' : 's'} (no customers yet)`;
 
-  const body = [
-    `## ${headline}`,
+  const subject = realCount > 0
+    ? `Wallet report: ${realCount} new lookup${realCount === 1 ? '' : 's'} ($${totalUsd})`
+    : `Wallet report: ${logs.length} test lookup${logs.length === 1 ? '' : 's'} ($${totalUsd})`;
+
+  const textBody = [
+    headline,
     '',
-    `**${logs.length} transfer${logs.length === 1 ? '' : 's'}** of USDC to \`${WALLET}\` in the last ${WINDOW_HOURS} hours. **Total: $${totalUsd} USDC.**`,
+    `${logs.length} transfer${logs.length === 1 ? '' : 's'} of USDC to ${WALLET} in the last ${WINDOW_HOURS} hours. Total: $${totalUsd} USDC.`,
     '',
-    '| Tx | From | USDC | Block | |',
-    '|---|---|---|---|---|',
     ...rows.map((r) => {
       const flag = r.isTest ? ' (test wallet)' : '';
-      const txShort = r.tx.slice(0, 10) + '…';
       const fromShort = r.from.slice(0, 10) + '…' + r.from.slice(-4);
-      return `| [${txShort}](https://basescan.org/tx/${r.tx}) | \`${fromShort}\`${flag} | $${toUsd(r.value)} | ${r.block} |`;
+      return `  $${toUsd(r.value)} from ${fromShort}${flag}  —  https://basescan.org/tx/${r.tx}`;
     }),
     '',
     `BaseScan wallet view: https://basescan.org/address/${WALLET}`,
     '',
-    '_Automated daily report. Days with no activity are silent._',
+    'Automated daily report. Days with no activity are silent.',
   ].join('\n');
 
-  const title = realCount > 0
-    ? `Wallet report: ${realCount} new lookup${realCount === 1 ? '' : 's'} ($${totalUsd})`
-    : `Wallet report: ${logs.length} test lookup${logs.length === 1 ? '' : 's'} ($${totalUsd})`;
+  const htmlRows = rows.map((r) => {
+    const flag = r.isTest ? ' <span style="color:#888">(test wallet)</span>' : '';
+    const txShort = r.tx.slice(0, 10) + '…';
+    const fromShort = r.from.slice(0, 10) + '…' + r.from.slice(-4);
+    return `<tr>
+      <td style="padding:4px 10px"><a href="https://basescan.org/tx/${r.tx}"><code>${txShort}</code></a></td>
+      <td style="padding:4px 10px"><code>${fromShort}</code>${flag}</td>
+      <td style="padding:4px 10px;text-align:right">$${toUsd(r.value)}</td>
+      <td style="padding:4px 10px;text-align:right">${r.block}</td>
+    </tr>`;
+  }).join('\n');
 
-  console.log(`Preparing issue: "${title}"`);
+  const htmlBody = `<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;font-size:14px;color:#222;max-width:680px">
+    <h2 style="margin:0 0 8px 0">${headline}</h2>
+    <p style="margin:0 0 12px 0"><strong>${logs.length} transfer${logs.length === 1 ? '' : 's'}</strong> of USDC to <code>${WALLET}</code> in the last ${WINDOW_HOURS} hours. <strong>Total: $${totalUsd} USDC.</strong></p>
+    <table style="border-collapse:collapse;border:1px solid #ddd;font-size:13px">
+      <thead><tr style="background:#f5f5f5;text-align:left">
+        <th style="padding:6px 10px">Tx</th>
+        <th style="padding:6px 10px">From</th>
+        <th style="padding:6px 10px;text-align:right">USDC</th>
+        <th style="padding:6px 10px;text-align:right">Block</th>
+      </tr></thead>
+      <tbody>${htmlRows}</tbody>
+    </table>
+    <p style="margin-top:12px"><a href="https://basescan.org/address/${WALLET}">BaseScan wallet view</a></p>
+    <p style="color:#888;font-size:12px">Automated daily report. Days with no activity are silent.</p>
+  </div>`;
+
+  console.log(`Preparing email: "${subject}"`);
 
   if (process.env.DRY_RUN) {
     console.log('--- DRY RUN ---');
-    console.log(body);
+    console.log(textBody);
     return;
   }
 
-  const repo = process.env.GITHUB_REPOSITORY;
-  const token = process.env.GITHUB_TOKEN;
-  if (!repo || !token) throw new Error('GITHUB_REPOSITORY and GITHUB_TOKEN required');
+  const user = process.env.GMAIL_USER;
+  const pass = process.env.GMAIL_APP_PASSWORD;
+  const to = process.env.NOTIFY_EMAIL || user;
+  if (!user || !pass) throw new Error('GMAIL_USER and GMAIL_APP_PASSWORD required');
 
-  const res = await fetch(`https://api.github.com/repos/${repo}/issues`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-    },
-    body: JSON.stringify({ title, body, labels: ['wallet-report'] }),
+  const transport = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    auth: { user, pass },
   });
-  if (!res.ok) throw new Error(`GitHub issue creation failed: ${res.status} ${await res.text()}`);
-  const issue = await res.json();
-  console.log(`Opened issue #${issue.number}: ${issue.html_url}`);
+
+  const info = await transport.sendMail({
+    from: `"phone-intel-mcp watcher" <${user}>`,
+    to,
+    subject,
+    text: textBody,
+    html: htmlBody,
+  });
+
+  console.log(`Sent email to ${to}: messageId=${info.messageId}`);
 }
 
 main().catch((err) => {
