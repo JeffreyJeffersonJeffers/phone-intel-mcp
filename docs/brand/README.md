@@ -1,20 +1,37 @@
 # Brand assets
 
-- `logo.svg` — primary logo. 256×256 artboard, rounded dark tile, "PI" monogram in a blue accent with a small cyan signal dot. Scales cleanly from a 16px favicon up to listing hero sizes.
+- `logo.svg` — primary logo. Full-bleed dark fill (edge-to-edge, no inner rounded corners so listing containers can clip without a visible inner tile), "PI" monogram in a blue accent with a small cyan signal dot. 256-unit viewBox at 1024×1024 natural render size. Works as a 16px favicon through a listing hero.
+- `logo.png` — 1024×1024 bitmap generated from `logo.svg`. mcp.so (and some other listings) reject SVG uploads and want PNG; this is the canonical asset for those.
 
-## Exporting to PNG for listings that don't accept SVG
+## Regenerating the PNG
 
-Most directories (mcp.so, PayAPI Market, x402scan, awesome-x402) accept SVG directly, but some third-party platforms want a bitmap. One-line converters:
+Use whichever converter is on hand. The known-working recipe on macOS with no extra install:
 
 ```bash
-# rsvg-convert (part of librsvg; brew install librsvg)
-rsvg-convert -w 512 -h 512 docs/brand/logo.svg -o docs/brand/logo-512.png
-
-# ImageMagick
-magick convert -background none -resize 512x512 docs/brand/logo.svg docs/brand/logo-512.png
-
-# Inkscape CLI
-inkscape --export-type=png --export-width=512 docs/brand/logo.svg
+# macOS built-in (Quick Look). -s is the OUTPUT size in pixels;
+# the SVG's own width/height tell the renderer at what resolution to rasterize,
+# which is why logo.svg declares width="1024" height="1024" with a 256 viewBox.
+qlmanage -t -s 1024 -o docs/brand/ docs/brand/logo.svg \
+  && mv docs/brand/logo.svg.png docs/brand/logo.png
 ```
 
-Or open `logo.svg` in a browser, right-click the image, and "Save image as…" — Chrome / Safari will render and save as PNG at the current zoom.
+Other converters if installed:
+
+```bash
+# rsvg-convert (brew install librsvg)
+rsvg-convert -w 1024 -h 1024 docs/brand/logo.svg -o docs/brand/logo.png
+
+# ImageMagick
+magick -background none -resize 1024x1024 docs/brand/logo.svg docs/brand/logo.png
+
+# Inkscape CLI
+inkscape --export-type=png --export-width=1024 docs/brand/logo.svg
+```
+
+If an output PNG shows white padding in any corner after `qlmanage`, the SVG's `width`/`height` attrs are smaller than `-s`; raise them to match.
+
+## Where it's live
+
+- mcp.so avatar — uploaded 2026-11-06 (PNG).
+- PayAPI Market — pending email to Chet Parker with the PNG attached.
+- x402scan — no user-editable logo field.

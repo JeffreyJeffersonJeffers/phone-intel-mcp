@@ -1,8 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Phone Intel MCP logo">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="1024" height="1024" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Phone Intel MCP logo">
   <title>Phone Intel MCP</title>
-  <rect width="256" height="256" rx="52" fill="#0b1220"/>
-  <text x="50%" y="56%" text-anchor="middle" dominant-baseline="middle"
+  <!-- Fills the full canvas edge-to-edge (no rounded corners here) so container clipping stays clean. -->
+  <rect width="256" height="256" fill="#0b1220"/>
+  <!-- "PI" centered on (128, 132) — slight y nudge from 128 for optical center (cap-height sits visually low otherwise). -->
+  <text x="128" y="132"
+        text-anchor="middle" dominant-baseline="middle"
         font-family="Inter, 'SF Pro Display', 'Segoe UI', system-ui, -apple-system, sans-serif"
-        font-weight="800" font-size="136" fill="#60a5fa" letter-spacing="-6">PI</text>
-  <circle cx="200" cy="60" r="11" fill="#22d3ee"/>
+        font-weight="800" font-size="144" fill="#60a5fa">PI</text>
+  <!-- Signal dot tucked in, inset enough that container rounding never clips it. -->
+  <circle cx="196" cy="60" r="12" fill="#22d3ee"/>
 </svg>
